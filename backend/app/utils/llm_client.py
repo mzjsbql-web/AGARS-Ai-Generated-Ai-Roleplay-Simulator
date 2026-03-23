@@ -101,11 +101,12 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         response_format: Optional[Dict] = None,
-    ) -> str:
+    ) -> tuple:
         """
         使用原生 google-genai SDK 调用 Gemini，支持 safety_settings BLOCK_NONE。
-        注：OpenAI 兼容接口现已支持 extra_body.google.safety_settings，
-        CompatOpenAIClient 已独立实现；此路径为 LLMClient 专用。
+
+        Returns:
+            (response_text, actual_messages) — 响应文本 + 包装后实际发送的消息列表（供日志记录）
         """
         try:
             from google import genai
@@ -136,6 +137,7 @@ class LLMClient:
         _df = PROMPT_DEFAULTS.get(wrapper_key, {})
         wrap_messages = _ov.get('messages', _df.get('messages', []))
 
+        wrapped = bool(wrap_messages)
         if wrap_messages:
             combined = '\n\n'.join(c for _, c in user_parts)
             contents = []
@@ -152,6 +154,17 @@ class LLMClient:
             for role, content in user_parts:
                 gemini_role = 'model' if role == 'assistant' else role
                 contents.append(types.Content(role=gemini_role, parts=[types.Part(text=content)]))
+
+        # 构建实际发送的消息列表（供 monitor 日志记录）
+        actual_messages = []
+        if system_instruction:
+            actual_messages.append({"role": "system", "content": system_instruction})
+        for c in contents:
+            role_str = 'assistant' if c.role == 'model' else c.role
+            text = c.parts[0].text if c.parts else ''
+            actual_messages.append({"role": role_str, "content": text})
+        if wrapped:
+            actual_messages.append({"_wrapped": True})
 
         config_kwargs: Dict[str, Any] = dict(
             temperature=temperature,
@@ -209,7 +222,7 @@ class LLMClient:
                 diag_parts.append("candidates=[]（无候选结果）")
             logger.warning(f"Gemini 原生 SDK 返回空内容，诊断: {'; '.join(diag_parts) or '无额外信息'}")
 
-        return ''.join(chunks)
+        return ''.join(chunks), actual_messages
 
     def chat(
         self,
@@ -267,12 +280,14 @@ class LLMClient:
             kwargs["response_format"] = response_format
 
         last_error = None
+        log_messages = messages  # 默认记录原始消息，Gemini 路径会替换为包装后的
         for attempt in range(max_retries):
             try:
                 start_time = time.time()
                 if use_gemini_native:
-                    content = self._chat_gemini_native(messages, temperature, max_tokens, response_format)
+                    content, log_messages = self._chat_gemini_native(messages, temperature, max_tokens, response_format)
                 else:
+                    log_messages = actual_messages
                     chunks = []
                     with self.client.chat.completions.create(**kwargs, stream=True) as stream:
                         for chunk in stream:
@@ -283,7 +298,7 @@ class LLMClient:
                 if not content.strip():
                     raise ValueError("LLM 返回空内容")
                 duration_ms = (time.time() - start_time) * 1000
-                monitor.log_full(source="LLMClient", model=self.model, messages=messages, kwargs={"temperature": temperature, "max_tokens": max_tokens}, response=content, duration_ms=duration_ms)
+                monitor.log_full(source="LLMClient", model=self.model, messages=log_messages, kwargs={"temperature": temperature, "max_tokens": max_tokens}, response=content, duration_ms=duration_ms)
                 return content
             except Exception as e:
                 last_error = e
@@ -293,7 +308,7 @@ class LLMClient:
                     time.sleep(wait)
 
         duration_ms = (time.time() - start_time) * 1000
-        monitor.log_full(source="LLMClient", model=self.model, messages=messages, kwargs={"temperature": temperature, "max_tokens": max_tokens}, duration_ms=duration_ms, error=str(last_error))
+        monitor.log_full(source="LLMClient", model=self.model, messages=log_messages, kwargs={"temperature": temperature, "max_tokens": max_tokens}, duration_ms=duration_ms, error=str(last_error))
         raise last_error
 
     def chat_json(

@@ -11,6 +11,7 @@ Graphiti 是 Zep 的开源图谱引擎，使用 add_episode_bulk 批量添加数
 import asyncio
 import logging
 import os
+import time as _time
 import uuid
 import threading
 from datetime import datetime
@@ -369,6 +370,9 @@ ADDITIONAL RULES FOR NARRATIVE TEXT (中文叙事文本补充规则):
         # 跨批次节点上下文注入：处理完每批后更新，供下批使用
         _known_graph_nodes: List[Dict[str, str]] = []
 
+        # 记录失败批次，容忍部分失败
+        failed_batches: List[Dict[str, Any]] = []
+
         # 分批处理
         for i in range(0, total_chunks, batch_size):
             batch_chunks = list(chunks[i:i + batch_size])
@@ -400,45 +404,91 @@ ADDITIONAL RULES FOR NARRATIVE TEXT (中文叙事文本补充规则):
                 ))
 
             # 调用 Graphiti bulk API（不触发 edge invalidation）
-            try:
-                logger.info(f"[batch {batch_num}/{total_batches}] 开始 add_episode_bulk ({len(episodes)} episodes)...")
-                self._run(self._graphiti.add_episode_bulk(
-                    bulk_episodes=episodes,
-                    group_id=group_id,
-                    entity_types=entity_types if entity_types else None,
-                    edge_types=edge_types if edge_types else None,
-                    edge_type_map=edge_type_map if edge_type_map else None,
-                    custom_extraction_instructions=(
-                        "重要提取规则（必须遵守）：\n"
-                        "1. 时间标记：如文本提及时间（'一年前'、'三个月后'、'幼年时'、'last year'等），"
-                        "必须在 fact 字段中原文保留。例：'（一年前）角色A从商人处购买了一把剑'\n"
-                        "2. 实体摘要：尽量详细，包含身份、职业、关键关系、能力特长、当前状态。"
-                        "不要过度压缩——500字符以内即可，不必追求极简\n"
-                        "3. 中文别名：同一人物的姓名、称号、外号、代称（如'那位老人'的真名）"
-                        "应识别为同一实体，使用最完整的名称作为实体名\n"
-                        "4. 保留具体细节：不要将具体事件、地点、物品泛化为笼统描述\n"
-                        "5. 如果文本开头的 [本段涉及实体] 提供了实体描述，"
-                        "利用它来更准确地识别和关联实体，但以正文内容为准\n"
-                        "6. 关系必须生成独立的 edge：两个实体之间的每种关系都应提取为独立的 fact triple，"
-                        "不要仅写在实体 summary 中。即使关系是隐含的（如叙述暗示A是B的师父），"
-                        "也应提取为 edge"
-                    ),
-                ))
-                logger.info(f"[batch {batch_num}/{total_batches}] add_episode_bulk 完成")
-                processed_count += len(batch_chunks)
+            # 注意：compat_llm_client 内部已有 3 次 LLM 级重试；
+            # 这里在 batch 级别再做最多 BATCH_MAX_RETRIES 次重试，
+            # 覆盖 LLM 重试也无法恢复的瞬时故障（如 API 网关超时）。
+            BATCH_MAX_RETRIES = 2
+            batch_success = False
+            for batch_attempt in range(BATCH_MAX_RETRIES):
+                try:
+                    attempt_label = f" (重试 {batch_attempt})" if batch_attempt > 0 else ""
+                    logger.info(
+                        f"[batch {batch_num}/{total_batches}]{attempt_label} "
+                        f"开始 add_episode_bulk ({len(episodes)} episodes)..."
+                    )
+                    self._run(self._graphiti.add_episode_bulk(
+                        bulk_episodes=episodes,
+                        group_id=group_id,
+                        entity_types=entity_types if entity_types else None,
+                        edge_types=edge_types if edge_types else None,
+                        edge_type_map=edge_type_map if edge_type_map else None,
+                        custom_extraction_instructions=(
+                            "重要提取规则（必须遵守）：\n"
+                            "1. 时间标记：如文本提及时间（'一年前'、'三个月后'、'幼年时'、'last year'等），"
+                            "必须在 fact 字段中原文保留。例：'（一年前）角色A从商人处购买了一把剑'\n"
+                            "2. 实体摘要：尽量详细，包含身份、职业、关键关系、能力特长、当前状态。"
+                            "不要过度压缩——500字符以内即可，不必追求极简\n"
+                            "3. 中文别名：同一人物的姓名、称号、外号、代称（如'那位老人'的真名）"
+                            "应识别为同一实体，使用最完整的名称作为实体名\n"
+                            "4. 保留具体细节：不要将具体事件、地点、物品泛化为笼统描述\n"
+                            "5. 如果文本开头的 [本段涉及实体] 提供了实体描述，"
+                            "利用它来更准确地识别和关联实体，但以正文内容为准\n"
+                            "6. 关系必须生成独立的 edge：两个实体之间的每种关系都应提取为独立的 fact triple，"
+                            "不要仅写在实体 summary 中。即使关系是隐含的（如叙述暗示A是B的师父），"
+                            "也应提取为 edge"
+                        ),
+                    ))
+                    logger.info(f"[batch {batch_num}/{total_batches}] add_episode_bulk 完成")
+                    processed_count += len(batch_chunks)
+                    batch_success = True
 
-                # 当前批次处理完后，查询图谱中已有节点，供下批注入使用
-                if i + batch_size < total_chunks:
-                    try:
-                        _known_graph_nodes = self._get_current_nodes_brief(group_id)
-                    except Exception as _qe:
-                        logger.warning(f"[batch {batch_num}] 查询已知节点失败，跳过下批注入: {_qe}")
-                        _known_graph_nodes = []
-            except Exception as e:
-                logger.error(f"[batch {batch_num}/{total_batches}] add_episode_bulk 失败: {e}", exc_info=True)
-                if progress_callback:
-                    progress_callback(f"批次 {batch_num} 处理失败: {str(e)}", 0)
-                raise
+                    # 当前批次处理完后，查询图谱中已有节点，供下批注入使用
+                    if i + batch_size < total_chunks:
+                        try:
+                            _known_graph_nodes = self._get_current_nodes_brief(group_id)
+                        except Exception as _qe:
+                            logger.warning(f"[batch {batch_num}] 查询已知节点失败，跳过下批注入: {_qe}")
+                            _known_graph_nodes = []
+                    break  # 成功，跳出重试循环
+
+                except Exception as e:
+                    if batch_attempt < BATCH_MAX_RETRIES - 1:
+                        wait = 30 * (batch_attempt + 1)
+                        logger.warning(
+                            f"[batch {batch_num}/{total_batches}] add_episode_bulk 失败，"
+                            f"{wait}s 后重试 ({batch_attempt+1}/{BATCH_MAX_RETRIES}): {e}"
+                        )
+                        if progress_callback:
+                            progress_callback(
+                                f"批次 {batch_num} 失败，{wait}s 后重试...", 0
+                            )
+                        _time.sleep(wait)
+                    else:
+                        # 重试用尽，记录失败并继续后续批次
+                        logger.error(
+                            f"[batch {batch_num}/{total_batches}] add_episode_bulk "
+                            f"重试 {BATCH_MAX_RETRIES} 次后仍失败，跳过此批次: {e}",
+                            exc_info=True,
+                        )
+                        failed_batches.append({"batch": batch_num, "error": str(e)})
+                        if progress_callback:
+                            progress_callback(
+                                f"批次 {batch_num} 重试后仍失败，已跳过: {str(e)[:80]}", 0
+                            )
+
+        # 汇总结果
+        if failed_batches:
+            total_batches = (total_chunks + batch_size - 1) // batch_size
+            logger.warning(
+                f"图谱构建部分批次失败: {len(failed_batches)}/{total_batches} 批失败，"
+                f"{processed_count}/{total_chunks} 块成功处理"
+            )
+            if processed_count == 0:
+                # 全部失败：抛出最后一个错误
+                raise RuntimeError(
+                    f"图谱构建失败: 全部 {len(failed_batches)} 个批次均失败。"
+                    f"最后错误: {failed_batches[-1]['error']}"
+                )
 
         return processed_count
 

@@ -562,19 +562,33 @@ def build_graph():
                             progress=progress
                         )
 
-                    builder.add_text_batches(
+                    file_processed = builder.add_text_batches(
                         graph_id,
                         chunks,
                         batch_size=batch_size,
                         progress_callback=add_progress_callback,
                         source_description=filename,
                     )
-                    processed_so_far += len(chunks)
-                    build_logger.info(
-                        f"[{task_id}] 文件 {file_idx+1}/{len(file_chunks)} 写入完成: {filename} ({len(chunks)} 块)"
-                    )
+                    processed_so_far += file_processed
+                    file_skipped = len(chunks) - file_processed
+                    if file_skipped > 0:
+                        build_logger.warning(
+                            f"[{task_id}] 文件 {file_idx+1}/{len(file_chunks)} 部分写入: "
+                            f"{filename} ({file_processed}/{len(chunks)} 块成功，{file_skipped} 块跳过)"
+                        )
+                    else:
+                        build_logger.info(
+                            f"[{task_id}] 文件 {file_idx+1}/{len(file_chunks)} 写入完成: {filename} ({len(chunks)} 块)"
+                        )
 
-                build_logger.info(f"[{task_id}] [计时] add_text_batches({total_chunks}块): {_time.time()-phase_start:.1f}s")
+                skipped_total = total_chunks - processed_so_far
+                if skipped_total > 0:
+                    build_logger.warning(
+                        f"[{task_id}] [计时] add_text_batches({total_chunks}块, "
+                        f"{skipped_total}块因错误跳过): {_time.time()-phase_start:.1f}s"
+                    )
+                else:
+                    build_logger.info(f"[{task_id}] [计时] add_text_batches({total_chunks}块): {_time.time()-phase_start:.1f}s")
 
                 # ── 先用预提取数据充实所有节点 summary ───────────────────
                 # 必须在去重之前：去重用 embedding(name+summary) 做相似度，

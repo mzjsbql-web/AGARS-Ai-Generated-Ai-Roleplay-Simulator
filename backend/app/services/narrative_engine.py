@@ -887,6 +887,9 @@ class NarrativeEngine:
         """
         根据预提取的地点名单构建世界地图拓扑（邻接关系）。
         复用 world_map_build prompt，专注于拓扑推理而非地点发现。
+
+        包含截断检测：如果 LLM 输出被截断导致地点数远少于输入，
+        会自动重试（缩小输入列表 + 提高 max_tokens）。
         """
         if not location_names:
             return {}
@@ -918,33 +921,77 @@ class NarrativeEngine:
         except Exception as e:
             logger.debug(f"查询地点图谱信息失败（非致命）: {e}")
 
-        locations_str = "\n".join(f"- {loc}" for loc in location_names)
         facts_str = "\n".join(location_facts) if location_facts else "（无额外地点信息）"
 
-        prompt = safe_render(get_template('world_map_build'), {
-            'initial_scene': initial_scene or "一个虚构的叙事世界",
-            'known_locations': locations_str,
-            'location_facts': facts_str,
-        })
+        # ── 过滤过于模糊的地点名（单字、纯方位词等） ──
+        _vague = {'屋', '室', '房', '门', '厅', '院', '楼', '阁', '处', '宫',
+                  '里间', '正房', '堂屋', '后门', '二门', '北边', '卧室', '里头'}
+        filtered_names = [n for n in location_names if n not in _vague and len(n) >= 2]
+        if not filtered_names:
+            filtered_names = location_names  # 全被过滤掉就用原始列表
 
-        try:
-            _p = get_llm_params('world_map_build')
-            result = get_client_for_prompt('world_map_build').chat_json(
-                messages=[
-                    {"role": "system", "content": get_system('world_map_build')},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=_p['temperature'],
-                max_tokens=_p['max_tokens'],
-            )
-            world_map = result.get("locations", result)
-            if isinstance(world_map, dict) and world_map:
-                world_map = cls._normalize_world_map(world_map)
-                logger.info(f"地点列表地图构建完成: {len(world_map)} 个地点: {list(world_map.keys())}")
-                return world_map
-        except Exception as e:
-            logger.error(f"地点列表地图构建失败: {e}")
-        return {}
+        # ── 最多尝试 2 次，第 2 次缩减列表并提高 max_tokens ──
+        MIN_EXPECTED = 15  # 合理地图的最少地点数
+        best_map: Dict = {}
+
+        for attempt in range(2):
+            if attempt == 0:
+                use_names = filtered_names
+            else:
+                # 第 2 次：只保留在图谱中有 summary 的地点（更可靠的核心地点）
+                names_with_facts = {f.split(":")[0].lstrip("- ").strip()
+                                    for f in (location_facts or [])}
+                use_names = [n for n in filtered_names if n in names_with_facts]
+                if len(use_names) < MIN_EXPECTED:
+                    use_names = filtered_names[:60]  # 兜底：取前 60 个
+                logger.info(f"地图重试: 缩减地点列表至 {len(use_names)} 个")
+
+            locations_str = "\n".join(f"- {loc}" for loc in use_names)
+            prompt = safe_render(get_template('world_map_build'), {
+                'initial_scene': initial_scene or "一个虚构的叙事世界",
+                'known_locations': locations_str,
+                'location_facts': facts_str,
+            })
+
+            try:
+                _p = get_llm_params('world_map_build')
+                # 第 2 次尝试提高 max_tokens 以减少截断风险
+                max_tok = _p['max_tokens'] if attempt == 0 else max(_p['max_tokens'], 16384)
+                result = get_client_for_prompt('world_map_build').chat_json(
+                    messages=[
+                        {"role": "system", "content": get_system('world_map_build')},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=_p['temperature'],
+                    max_tokens=max_tok,
+                )
+                world_map = result.get("locations", result)
+                if isinstance(world_map, dict) and world_map:
+                    world_map = cls._normalize_world_map(world_map)
+                    logger.info(
+                        f"地点列表地图构建完成 (attempt {attempt+1}): "
+                        f"{len(world_map)} 个地点: {list(world_map.keys())}"
+                    )
+                    # 截断检测：输入 > 30 个地点但输出 < MIN_EXPECTED，判定为截断
+                    if len(use_names) > 30 and len(world_map) < MIN_EXPECTED:
+                        logger.warning(
+                            f"地图疑似被截断: 输入 {len(use_names)} 个地点，"
+                            f"仅输出 {len(world_map)} 个（< {MIN_EXPECTED}），"
+                            f"{'将重试' if attempt == 0 else '已用最佳结果'}"
+                        )
+                        # 保留当前结果作为兜底，继续重试
+                        if len(world_map) > len(best_map):
+                            best_map = world_map
+                        if attempt == 0:
+                            continue  # 重试
+                    return world_map
+            except Exception as e:
+                logger.error(f"地点列表地图构建失败 (attempt {attempt+1}): {e}")
+
+        # 所有尝试都不理想，返回最佳结果
+        if best_map:
+            logger.warning(f"地图构建使用截断后的最佳结果: {len(best_map)} 个地点")
+        return best_map
 
     @staticmethod
     def _normalize_world_map(raw: Dict) -> Dict:
