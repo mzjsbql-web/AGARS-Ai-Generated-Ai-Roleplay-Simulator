@@ -11,7 +11,7 @@
 ## 演示视频
   <div align="center">
     <a href="https://www.bilibili.com/video/BV1MBXwBSEvp" target="_blank">
-      <img src="./static/image/视频截图.png" width="600" alt="演示视频"/>
+      <img src="./static/image/视频截图.jpg" width="600" alt="演示视频"/>
     </a>
   </div>
 
