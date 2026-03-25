@@ -6,15 +6,14 @@
 
 **AGARS** is a project built upon [MiroFish](https://github.com/666ghj/MiroFish), focusing on AI-driven roleplay simulation.
 
-Building on MiroFish's multi-agent prediction engine, AGARS introduces a **Narrative Engine** system that enables immersive narrative experiences during simulations. It also incorporates **FalkorDB local knowledge graphs** as an alternative to cloud-only solutions, along with **LLM call monitoring**, **prompt configuration management**, and more.
+Instead of the single-turn dialogue approach to roleplay, this project delegates narrative, control, and character tasks to separate agents. By avoiding multiple tasks in a single turn, it greatly preserves AI reasoning capacity, and through dedicated management of agent memory and models, achieves costs comparable to conventional frontends.
 
 ### Key Features
 
 - **Multi-Agent Simulation**: Automatically constructs a digital world from seed materials, with agents possessing independent personalities and long-term memory
 - **Narrative Engine**: Transforms simulation processes into interactive narrative experiences
 - **Knowledge Graph**: Supports both Zep Cloud and FalkorDB local graph modes
-- **Report Generation**: Automatically generates analysis reports after simulation
-- **Deep Interaction**: Chat with any character in the simulated world
+- **Context Wrapping & Text Variable Invocation**: Provides deep prompt control with high flexibility, with a built-in monitor for debugging
 
 ## Setup
 
