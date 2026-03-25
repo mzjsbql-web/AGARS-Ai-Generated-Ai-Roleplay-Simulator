@@ -6,14 +6,36 @@
 
 **AGARS** is a project built upon [MiroFish](https://github.com/666ghj/MiroFish), focusing on AI-driven roleplay simulation.
 
-Instead of the single-turn dialogue approach to roleplay, this project delegates narrative, control, and character tasks to separate agents. By avoiding multiple tasks in a single turn, it greatly preserves AI reasoning capacity, and through dedicated management of agent memory and models, achieves costs comparable to conventional frontends.
+Conventional AI roleplay frontends cram narrative, character roleplay, and world management into a single dialogue turn, severely diluting AI reasoning capacity — then compensate by stacking ever-longer context windows, which is both expensive and lossy. This project separates these tasks into independent agents, each focused on a single job per call, significantly improving output quality. A knowledge graph replaces brute-force context stacking with on-demand retrieval, and tiered model scheduling keeps overall costs comparable to conventional frontends.
 
 ### Key Features
 
-- **Multi-Agent Simulation**: Automatically constructs a digital world from seed materials, with agents possessing independent personalities and long-term memory
-- **Narrative Engine**: Transforms simulation processes into interactive narrative experiences
-- **Knowledge Graph**: Supports both Zep Cloud and FalkorDB local graph modes
-- **Context Wrapping & Text Variable Invocation**: Provides deep prompt control with high flexibility, with a built-in monitor for debugging
+- **Task Separation Architecture**: Narrative, character roleplay, and world management are handled by independent agents — instead of cramming everything into a single dialogue turn, the AI focuses on one job at a time, significantly improving reasoning quality
+- **Knowledge Graph Memory**: Structured memory via FalkorDB / Zep replaces brute-force context stacking — character relationships and world facts are persisted and retrieved on demand, not dumped wholesale into the prompt
+- **AI Plot Planning**: A dedicated planner orchestrates NPC reactions, scene transitions, and new character introductions after each player action, producing dramatic pacing rather than mechanical turn-cycling
+- **Dynamic World Modeling**: Map topology, character locations, and item ownership are tracked at the engine level with adjacency-validated movement — world state lives in the runtime, not in the prompt
+- **Deep Prompt Control**: Context wrapping and text variable invocation provide highly customizable prompt engineering, with a built-in monitor for real-time inspection of every LLM call for debugging and tuning
+- **Cost Efficiency**: Agents are assigned different models and context windows by role; knowledge graph retrieval replaces long-context stacking — overall cost stays comparable to conventional single-turn frontends
+
+## Screenshots
+
+### Narrative Mode
+![Narrative Mode](./static/image/叙事模式.jpg)
+
+### Knowledge Graph & Monitor
+![Knowledge Graph & Monitor](./static/image/前端monitor.png)
+
+### Prompt Editor
+![Prompt Editor](./static/image/prompt编辑.png)
+
+### Message Wrapping
+![Message Wrapping](./static/image/消息包装.png)
+
+### Text Variable Reference
+![Text Variable Reference](./static/image/变量名说明.png)
+
+### Monitor History
+![Monitor History](./static/image/monitor%20history%20page.png)
 
 ## Setup
 
