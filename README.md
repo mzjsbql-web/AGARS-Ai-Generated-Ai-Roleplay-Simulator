@@ -8,6 +8,13 @@
 
 项目在 MiroFish 多智能体预测引擎的基础上，新增了**叙事引擎**（Narrative Engine）系统，支持以沉浸式的叙事视角体验模拟过程。同时引入 **FalkorDB 本地知识图谱**替代纯云端方案，增加了 **LLM 调用监控**、**Prompt 配置管理**等功能。
 
+## 演示视频
+  <div align="center">
+    <a href="https://www.bilibili.com/video/BV1MBXwBSEvp" target="_blank">
+      <img src="./static/image/视频封面.png" width="600" alt="演示视频"/>
+    </a>
+  </div>
+
 ### 核心功能
 
 - **多智能体模拟**：基于种子材料自动构建数字世界，智能体具备独立人格与长期记忆
