@@ -169,7 +169,7 @@
                 <span class="setting-hint">推荐 0-100</span>
               </div>
             </div>
-            <p class="settings-note">较大的 chunk_size / batch_size 可加速构建，但消耗更多 Token</p>
+            <p class="settings-note">使用 embedding 语义切分，chunk_size 为目标大小；chunk_overlap 仅在降级时生效</p>
 
             <!-- 开始构建按钮 -->
             <button

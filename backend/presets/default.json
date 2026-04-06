@@ -1,0 +1,10 @@
+{
+  "id": "default",
+  "name": "默认配置",
+  "description": "系统默认配置，未做任何自定义修改",
+  "created_at": 1775508629,
+  "updated_at": 1775508629,
+  "is_default": true,
+  "prompts": {},
+  "narrative_engine": {}
+}

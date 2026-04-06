@@ -141,6 +141,22 @@ export function deleteEntityNode(graphId, entityUuid) {
 }
 
 /**
+ * 更新图谱中单条边的属性
+ * @param {String} graphId - 图谱ID
+ * @param {String} edgeUuid - 边UUID
+ * @param {Object} data - { name?, fact? }
+ */
+export function updateEdge(graphId, edgeUuid, data) {
+  return requestWithRetry(() =>
+    service({
+      url: `/api/graph/edge/${graphId}/${edgeUuid}`,
+      method: 'put',
+      data
+    })
+  )
+}
+
+/**
  * 手动合并节点
  * @param {String} graphId - 图谱ID
  * @param {Array<String>} uuids - 要合并的节点 UUID 列表（至少 2 个）

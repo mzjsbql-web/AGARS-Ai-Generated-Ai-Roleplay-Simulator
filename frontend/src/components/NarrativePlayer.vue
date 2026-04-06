@@ -127,6 +127,53 @@
           :playerEntityUuid="playerEntityUuid"
         />
 
+        <!-- Collapsible Character Profiles -->
+        <div class="side-section profiles-section" :class="{ collapsed: profilesPanelCollapsed }">
+          <h3 @click="profilesPanelCollapsed = !profilesPanelCollapsed" class="collapsible-header">
+            <span class="collapse-icon">{{ profilesPanelCollapsed ? '▸' : '▾' }}</span>
+            角色列表 <span class="count-badge">{{ characterProfiles.length }}</span>
+          </h3>
+          <div v-if="!profilesPanelCollapsed" class="profiles-panel-body">
+            <div class="profiles-panel-search">
+              <input
+                v-model="profilePanelSearch"
+                type="text"
+                placeholder="搜索角色名..."
+                class="profiles-panel-search-input"
+              />
+            </div>
+            <div class="profiles-panel-scroll">
+              <div
+                v-for="profile in filteredPanelProfiles"
+                :key="profile.entity_uuid"
+                class="profile-panel-item"
+                :class="{
+                  'is-player': profile.is_player,
+                  expanded: expandedProfileUuid === profile.entity_uuid
+                }"
+              >
+                <div class="profile-panel-row" @click="toggleProfileExpand(profile.entity_uuid)">
+                  <span class="profile-panel-name">
+                    {{ profile.name }}
+                    <span v-if="profile.is_player" class="profile-panel-player-tag">玩家</span>
+                  </span>
+                  <span class="profile-panel-loc">{{ agentLocations[profile.entity_uuid] || profile.current_location || '' }}</span>
+                </div>
+                <div v-if="expandedProfileUuid === profile.entity_uuid" class="profile-panel-detail">
+                  <div v-if="profile.profession" class="profile-detail-line"><span class="detail-label">职业</span>{{ profile.profession }}</div>
+                  <div v-if="profile.personality" class="profile-detail-line"><span class="detail-label">性格</span>{{ profile.personality }}</div>
+                  <div v-if="profile.temperament" class="profile-detail-line"><span class="detail-label">气质</span>{{ profile.temperament }}</div>
+                  <div v-if="profile.goals && profile.goals.length" class="profile-detail-line"><span class="detail-label">目标</span>{{ profile.goals.join('、') }}</div>
+                  <div v-if="profile.backstory" class="profile-detail-line"><span class="detail-label">背景</span>{{ profile.backstory.length > 100 ? profile.backstory.slice(0, 100) + '...' : profile.backstory }}</div>
+                  <div v-if="profile.speech_style" class="profile-detail-line"><span class="detail-label">话风</span>{{ profile.speech_style }}</div>
+                  <button class="profile-panel-edit-btn" @click.stop="openCharacterEditFromPanel(profile)">编辑</button>
+                </div>
+              </div>
+              <div v-if="filteredPanelProfiles.length === 0" class="profiles-panel-empty">无匹配角色</div>
+            </div>
+          </div>
+        </div>
+
         <!-- Background Events -->
         <div class="side-section events-section">
           <h3>背景事件 <span class="count-badge">{{ backgroundEvents.length }}</span></h3>
@@ -588,6 +635,28 @@ const submitInput = async () => {
   } finally {
     submitting.value = false
   }
+}
+
+// --- Collapsible Profile Panel (side panel) ---
+const profilesPanelCollapsed = ref(false)
+const expandedProfileUuid = ref(null)
+const profilePanelSearch = ref('')
+
+const filteredPanelProfiles = computed(() => {
+  const q = profilePanelSearch.value.trim().toLowerCase()
+  if (!q) return characterProfiles.value
+  return characterProfiles.value.filter(p =>
+    (p.name || '').toLowerCase().includes(q)
+  )
+})
+
+const toggleProfileExpand = (uuid) => {
+  expandedProfileUuid.value = expandedProfileUuid.value === uuid ? null : uuid
+}
+
+const openCharacterEditFromPanel = (profile) => {
+  showCharacterEditor.value = true
+  openCharacterEdit(profile)
 }
 
 // --- Character Editor ---
@@ -1183,6 +1252,133 @@ onUnmounted(() => {
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* Collapsible Profile Panel */
+.profiles-section {
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.profiles-section.collapsed {
+  max-height: none;
+  flex: none;
+}
+.collapsible-header {
+  cursor: pointer;
+  user-select: none;
+}
+.collapsible-header:hover {
+  color: #666;
+}
+.collapse-icon {
+  font-size: 11px;
+  margin-right: 2px;
+}
+.profiles-panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.profiles-panel-search {
+  padding: 0 0 8px;
+}
+.profiles-panel-search-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #E0E0E0;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  background: #FAFAFA;
+  box-sizing: border-box;
+}
+.profiles-panel-search-input:focus {
+  border-color: #999;
+  background: #FFF;
+}
+.profiles-panel-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+.profile-panel-item {
+  border-bottom: 1px solid #F0F0F0;
+}
+.profile-panel-item.is-player {
+  background: #FAFBFF;
+}
+.profile-panel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+.profile-panel-row:hover {
+  background: #F8F8F8;
+}
+.profile-panel-name {
+  font-weight: 600;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.profile-panel-player-tag {
+  font-size: 10px;
+  font-weight: 500;
+  color: #7C3AED;
+  background: #F3EEFF;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.profile-panel-loc {
+  font-size: 11px;
+  color: #999;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-panel-detail {
+  padding: 4px 0 10px 12px;
+  font-size: 12px;
+  color: #555;
+}
+.profile-detail-line {
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
+.detail-label {
+  display: inline-block;
+  width: 36px;
+  color: #999;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.profile-panel-edit-btn {
+  margin-top: 6px;
+  padding: 3px 12px;
+  font-size: 11px;
+  border: 1px solid #DDD;
+  border-radius: 3px;
+  background: #FFF;
+  color: #666;
+  cursor: pointer;
+}
+.profile-panel-edit-btn:hover {
+  border-color: #999;
+  color: #333;
+}
+.profiles-panel-empty {
+  padding: 16px 0;
+  text-align: center;
+  color: #CCC;
+  font-size: 12px;
 }
 
 @keyframes fadeInUp {

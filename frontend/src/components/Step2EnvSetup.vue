@@ -90,8 +90,14 @@
                 v-model="profileSearchQuery"
                 type="text"
                 class="profile-search-input"
-                placeholder="搜索角色名、职业、性格..."
+                :placeholder="searchNameOnly ? '搜索角色名...' : '搜索角色名、职业、性格...'"
               />
+              <button
+                class="search-mode-toggle"
+                :class="{ active: !searchNameOnly }"
+                @click="searchNameOnly = !searchNameOnly"
+                :title="searchNameOnly ? '当前：仅搜名称，点击切换全文' : '当前：全文搜索，点击切换仅名称'"
+              >{{ searchNameOnly ? '名称' : '全文' }}</button>
               <span v-if="profileSearchQuery" class="profile-search-count">
                 {{ filteredProfiles.length }} / {{ profiles.length }}
               </span>
@@ -112,9 +118,6 @@
                 <div v-if="narrativeMode" class="profile-btn-group">
                   <div class="profile-edit-btn" @click.stop="openEditProfile(profiles.indexOf(profile))">
                     <span>编辑</span>
-                  </div>
-                  <div class="profile-graph-btn" @click.stop="openGraphEditor(profiles.indexOf(profile))">
-                    <span>图谱</span>
                   </div>
                   <div class="profile-delete-btn" @click.stop="deleteProfile(profiles.indexOf(profile))">
                     <span>删除</span>
@@ -818,6 +821,17 @@
             <button class="close-btn" @click="editingProfile = null">×</button>
           </div>
           <div class="modal-body edit-form">
+            <!-- 关联已有图谱节点（仅添加新角色时显示） -->
+            <div v-if="editingIsNew && narrativeMode && unassignedNodes.length > 0" class="form-group link-node-group">
+              <label class="form-label">关联已有图谱节点 <span class="form-hint">（可选，选择后自动填充信息）</span></label>
+              <select v-model="selectedNodeUuid" class="form-input" @change="onSelectExistingNode">
+                <option value="">不关联，创建新节点</option>
+                <option v-for="node in unassignedNodes" :key="node.uuid" :value="node.uuid">
+                  {{ node.name }}{{ node.summary ? ' — ' + node.summary.slice(0, 40) : '' }}
+                </option>
+              </select>
+            </div>
+
             <div class="form-group">
               <label class="form-label">角色名称</label>
               <input type="text" v-model="editForm.name" class="form-input" placeholder="角色名称" />
@@ -998,7 +1012,7 @@ import {
   updateNarrativeProfile, addNarrativeProfile, deleteNarrativeProfile,
   prepareNarrative, getPrepareStatus as getNarrativePrepareStatus, getNarrativeProfiles
 } from '../api/narrative'
-import { getEntityEdges, createEntityNode, updateEntityEdges, updateEntityNode, deleteEntityNode } from '../api/graph'
+import { getGraphData, getEntityEdges, createEntityNode, updateEntityEdges, updateEntityNode, deleteEntityNode } from '../api/graph'
 
 const props = defineProps({
   simulationId: String,  // 从父组件传入
@@ -1045,6 +1059,7 @@ const selectedPlayerUuid = ref(null)
 // Profile 搜索
 const profileSearchQuery = ref('')
 const playerSearchQuery = ref('')
+const searchNameOnly = ref(true)  // true=仅名称, false=全文搜索
 const initialSceneText = ref('')
 const openingMode = ref('ai')
 const openingDirectText = ref('')
@@ -1082,6 +1097,8 @@ const handleSummarizeFile = async (event) => {
 // 叙事模式：编辑/添加人设
 const editingProfile = ref(null) // index or 'new'
 const editingIsNew = ref(false)
+const unassignedNodes = ref([])    // 图谱中无 profile 的节点列表
+const selectedNodeUuid = ref('')   // 新增 profile 时选中的已有节点 UUID
 const saving = ref(false)
 const editForm = ref({
   name: '',
@@ -1192,6 +1209,12 @@ const getAgentUsername = (agentId) => {
 const filteredProfiles = computed(() => {
   const q = profileSearchQuery.value.trim().toLowerCase()
   if (!q) return profiles.value
+  if (searchNameOnly.value) {
+    return profiles.value.filter(p =>
+      (p.name || '').toLowerCase().includes(q) ||
+      (p.username || '').toLowerCase().includes(q)
+    )
+  }
   return profiles.value.filter(p =>
     (p.name || '').toLowerCase().includes(q) ||
     (p.username || '').toLowerCase().includes(q) ||
@@ -1251,9 +1274,13 @@ const truncateBio = (bio) => {
 }
 
 const selectProfile = (profile) => {
-  selectedProfile.value = profile
   if (props.narrativeMode) {
+    // narrative 模式下直接进入编辑，不显示空的社交档案 modal
+    const idx = profiles.value.indexOf(profile)
+    if (idx >= 0) openEditProfile(idx)
     emit('highlight-graph-node', profile.entity_uuid)
+  } else {
+    selectedProfile.value = profile
   }
 }
 
@@ -1287,9 +1314,10 @@ const openEditProfile = (idx) => {
   }
 }
 
-const openAddProfile = () => {
+const openAddProfile = async () => {
   editingProfile.value = 'new'
   editingIsNew.value = true
+  selectedNodeUuid.value = ''
   editForm.value = {
     name: '',
     username: '',
@@ -1307,6 +1335,37 @@ const openAddProfile = () => {
     temperament: '',
     current_location: ''
   }
+
+  // 加载图谱中尚无 profile 的节点
+  const graphId = props.projectData?.graph_id
+  if (graphId) {
+    try {
+      const res = await getGraphData(graphId)
+      if (res.success && res.data?.nodes) {
+        const existingUuids = new Set(profiles.value.map(p => p.entity_uuid))
+        unassignedNodes.value = res.data.nodes.filter(n =>
+          n.uuid && n.name && !existingUuids.has(n.uuid)
+        )
+      }
+    } catch (err) {
+      console.error('Failed to load unassigned nodes:', err)
+      unassignedNodes.value = []
+    }
+  }
+}
+
+const onSelectExistingNode = () => {
+  const uuid = selectedNodeUuid.value
+  if (!uuid) return
+  const node = unassignedNodes.value.find(n => n.uuid === uuid)
+  if (node) {
+    editForm.value.name = node.name || ''
+    editForm.value.backstory = node.summary || ''
+    // 尝试推导 entity_type
+    const labels = node.labels || []
+    const customLabel = labels.find(l => l !== 'Entity' && l !== 'Node')
+    if (customLabel) editForm.value.profession = customLabel
+  }
 }
 
 const saveEditProfile = async () => {
@@ -1320,12 +1379,17 @@ const saveEditProfile = async () => {
 
   if (editingIsNew.value) {
     // ---- 添加新角色 ----
-    // 1) 先创建 FalkorDB 节点
     let realUuid = `custom_${Date.now()}`
-    const summaryText = isNarrative
-      ? (form.backstory || form.personality || '').substring(0, 500)
-      : (form.bio || form.persona || '').substring(0, 500)
-    if (graphId) {
+
+    if (selectedNodeUuid.value) {
+      // 关联已有图谱节点，复用其 UUID
+      realUuid = selectedNodeUuid.value
+      addLog(`关联已有图谱节点: ${form.name}`)
+    } else if (graphId) {
+      // 创建新 FalkorDB 节点
+      const summaryText = isNarrative
+        ? (form.backstory || form.personality || '').substring(0, 500)
+        : (form.bio || form.persona || '').substring(0, 500)
       try {
         const res = await createEntityNode(graphId, {
           name: form.name,
@@ -1544,30 +1608,37 @@ const saveGraphEdits = async () => {
 const deleteProfile = async (idx) => {
   const p = profiles.value[idx]
   if (!p) return
-  if (!confirm(`确定删除角色「${p.name}」？将同时删除图谱中的节点和关联边。`)) return
+  if (!confirm(`确定删除角色「${p.name}」？`)) return
 
   const graphId = props.projectData?.graph_id
   const entityUuid = p.entity_uuid
+  const isGraphNode = graphId && entityUuid && !entityUuid.startsWith('custom_')
+
+  // 询问是否同时删除图谱节点
+  const alsoDeleteNode = isGraphNode && confirm(
+    `是否同时删除图谱中「${p.name}」的节点及关联边？\n\n` +
+    `[确定] 删除节点（不可恢复）\n[取消] 仅移除角色，保留图谱节点`
+  )
 
   // 1) 从前端列表移除
   profiles.value.splice(idx, 1)
-  addLog(`已删除角色: ${p.name}`)
+  addLog(`已删除角色: ${p.name}` + (alsoDeleteNode ? '（含图谱节点）' : '（保留图谱节点）'))
 
   // 如果是已选玩家角色，清除选择
   if (selectedPlayerUuid.value === entityUuid) {
     selectedPlayerUuid.value = ''
   }
 
-  // 2) 删 FalkorDB 节点+边
-  if (graphId && entityUuid && !entityUuid.startsWith('custom_')) {
+  // 2) 仅在用户选择时删 FalkorDB 节点+边
+  if (alsoDeleteNode) {
     deleteEntityNode(graphId, entityUuid).catch(err => {
       addLog(`FalkorDB 节点删除失败: ${err.message}`)
     })
   }
 
-  // 3) 同步到叙事后端
+  // 3) 同步到叙事后端（传入 keep_node 参数）
   if (props.narrativeMode && effectiveNarrativeSessionId.value) {
-    deleteNarrativeProfile(effectiveNarrativeSessionId.value, entityUuid).catch(err => {
+    deleteNarrativeProfile(effectiveNarrativeSessionId.value, entityUuid, !alsoDeleteNode).catch(err => {
       addLog(`叙事后端删除失败: ${err.message}`)
     })
   }
@@ -2382,6 +2453,28 @@ onUnmounted(() => {
 .profile-search-input:focus {
   border-color: #999;
   background: #FFF;
+}
+
+.search-mode-toggle {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #DDD;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #666;
+  background: #FAFAFA;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.search-mode-toggle:hover {
+  border-color: #999;
+  background: #F0F0F0;
+}
+.search-mode-toggle.active {
+  border-color: #7C3AED;
+  color: #7C3AED;
+  background: #F5F0FF;
 }
 
 .profile-search-count {
@@ -4074,6 +4167,13 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.link-node-group {
+  background: #F8F6FF;
+  border: 1px dashed #C4B5FD;
+  border-radius: 6px;
+  padding: 10px;
 }
 
 .form-row {

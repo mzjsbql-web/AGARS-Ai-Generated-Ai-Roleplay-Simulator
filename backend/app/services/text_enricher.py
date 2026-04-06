@@ -111,19 +111,19 @@ class TextEnricher:
         return merged
 
     # ──────────────────────────────────────────────────────────────
-    # 2. 单段提取（LLM 调用）
+    # 2. 单段提取（两步 LLM 调用）
     # ──────────────────────────────────────────────────────────────
 
-    def _extract_one_section(self, section: str, section_idx: int) -> List[Dict[str, Any]]:
-        """对单个段落调用 LLM 提取实体信息，返回 entities 列表"""
-        prompt = safe_render(get_template('section_extraction'), {
-            'section_text': section[:12000],   # 安全截断，避免超长输入
+    def _extract_entities_one_section(self, section: str, section_idx: int) -> List[Dict[str, Any]]:
+        """Step 1: 对单个段落调用 LLM 只提取实体（不含关系），降低认知负担"""
+        prompt = safe_render(get_template('section_entity_extraction'), {
+            'section_text': section[:12000],
         })
         try:
-            _p = get_llm_params('section_extraction')
-            result = get_client_for_prompt('section_extraction').chat_json(
+            _p = get_llm_params('section_entity_extraction')
+            result = get_client_for_prompt('section_entity_extraction').chat_json(
                 messages=[
-                    {'role': 'system', 'content': get_system('section_extraction')},
+                    {'role': 'system', 'content': get_system('section_entity_extraction')},
                     {'role': 'user', 'content': prompt},
                 ],
                 temperature=_p['temperature'],
@@ -138,8 +138,60 @@ class TextEnricher:
             logger.warning(f"段落 {section_idx} 实体提取失败: {e}")
             return []
 
+    def _extract_relations_one_section(
+        self, section: str, section_idx: int, entity_names: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Step 2: 给定全局实体列表，从段落中提取关系"""
+        entity_list_str = '\n'.join(f'- {name}' for name in entity_names)
+        prompt = safe_render(get_template('section_relation_extraction'), {
+            'section_text': section[:12000],
+            'entity_list': entity_list_str,
+        })
+        try:
+            _p = get_llm_params('section_relation_extraction')
+            result = get_client_for_prompt('section_relation_extraction').chat_json(
+                messages=[
+                    {'role': 'system', 'content': get_system('section_relation_extraction')},
+                    {'role': 'user', 'content': prompt},
+                ],
+                temperature=_p['temperature'],
+                max_tokens=_p['max_tokens'],
+            )
+            relationships = result.get('relationships', [])
+            if not isinstance(relationships, list):
+                relationships = []
+            logger.debug(f"段落 {section_idx}: 提取到 {len(relationships)} 条关系")
+            return relationships
+        except Exception as e:
+            logger.warning(f"段落 {section_idx} 关系提取失败: {e}")
+            return []
+
+    # 保留旧接口供向后兼容（如有外部调用）
+    def _extract_one_section(self, section: str, section_idx: int) -> List[Dict[str, Any]]:
+        """旧版一体式提取（已弃用，保留向后兼容）"""
+        prompt = safe_render(get_template('section_extraction'), {
+            'section_text': section[:12000],
+        })
+        try:
+            _p = get_llm_params('section_extraction')
+            result = get_client_for_prompt('section_extraction').chat_json(
+                messages=[
+                    {'role': 'system', 'content': get_system('section_extraction')},
+                    {'role': 'user', 'content': prompt},
+                ],
+                temperature=_p['temperature'],
+                max_tokens=_p['max_tokens'],
+            )
+            entities = result.get('entities', [])
+            if not isinstance(entities, list):
+                entities = []
+            return entities
+        except Exception as e:
+            logger.warning(f"段落 {section_idx} 实体提取失败: {e}")
+            return []
+
     # ──────────────────────────────────────────────────────────────
-    # 3. 全文并行提取
+    # 3. 全文两步提取
     # ──────────────────────────────────────────────────────────────
 
     def extract_all_sections(
@@ -149,7 +201,13 @@ class TextEnricher:
         target_size: int = SECTION_TARGET_SIZE,
     ) -> Dict[str, Any]:
         """
-        将全文分段并行提取实体，合并后返回 entity_database。
+        两步提取：先并行提取实体，合并后再并行提取关系。
+
+        Step 1（并行）：每段独立提取实体（name, type, aliases, description, key_facts）
+        Step 2（并行）：基于全局实体列表，每段独立提取关系
+
+        分步提取降低了单次 LLM 调用的认知负担，使实体和关系的提取都更准确。
+        关系提取时拥有全局实体列表作为上下文，能更好地识别跨段引用。
 
         entity_database 格式：
         {
@@ -165,34 +223,72 @@ class TextEnricher:
         """
         sections = self.split_into_sections(text, target_size)
         total = len(sections)
-        logger.info(f"文本分为 {total} 个段落，开始并行提取...")
-        if progress_callback:
-            progress_callback(f"共 {total} 个段落，开始并行提取...", 0.0)
+        logger.info(f"文本分为 {total} 个段落，开始两步提取...")
 
-        # 用列表保留顺序（并行完成顺序不一定）
-        section_results: List[List[Dict]] = [[] for _ in range(total)]
+        # ── Step 1: 并行提取实体 ────────────────────────────────
+        if progress_callback:
+            progress_callback(f"第一步：提取实体（共 {total} 段）...", 0.0)
+
+        section_entities: List[List[Dict]] = [[] for _ in range(total)]
         completed = 0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_SECTION_WORKERS) as executor:
             future_to_idx = {
-                executor.submit(self._extract_one_section, sec, i): i
+                executor.submit(self._extract_entities_one_section, sec, i): i
                 for i, sec in enumerate(sections)
             }
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    section_results[idx] = future.result()
+                    section_entities[idx] = future.result()
                 except Exception as e:
-                    logger.warning(f"段落 {idx} 提取异常: {e}")
+                    logger.warning(f"段落 {idx} 实体提取异常: {e}")
                 completed += 1
                 if progress_callback:
                     progress_callback(
-                        f"已完成 {completed}/{total} 个段落",
-                        completed / total,
+                        f"实体提取: {completed}/{total}",
+                        completed / total * 0.5,  # 前 50% 进度给实体提取
                     )
 
-        entity_database = self._merge_entity_lists(section_results)
-        logger.info(f"实体数据库构建完成: {len(entity_database)} 个实体")
+        # 合并实体（此时无 relationships）
+        entity_database = self._merge_entity_lists(section_entities)
+        logger.info(f"Step 1 完成: {len(entity_database)} 个实体")
+
+        # ── Step 2: 并行提取关系（携带全局实体列表） ──────────────
+        if progress_callback:
+            progress_callback(f"第二步：提取关系（{len(entity_database)} 个已知实体）...", 0.5)
+
+        # 构建全局实体名称列表（含别名），供关系提取 prompt 使用
+        all_entity_names = self.get_all_names(entity_database)
+
+        section_relations: List[List[Dict]] = [[] for _ in range(total)]
+        completed = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_SECTION_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(
+                    self._extract_relations_one_section, sec, i, all_entity_names
+                ): i
+                for i, sec in enumerate(sections)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    section_relations[idx] = future.result()
+                except Exception as e:
+                    logger.warning(f"段落 {idx} 关系提取异常: {e}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        f"关系提取: {completed}/{total}",
+                        0.5 + completed / total * 0.5,  # 后 50% 进度给关系提取
+                    )
+
+        # 将关系合并到 entity_database
+        self._merge_relations_into_database(entity_database, section_relations)
+        total_rels = sum(len(e.get('relationships', [])) for e in entity_database.values())
+        logger.info(f"Step 2 完成: {total_rels} 条关系")
+        logger.info(f"实体数据库构建完成: {len(entity_database)} 个实体, {total_rels} 条关系")
         return entity_database
 
     # ──────────────────────────────────────────────────────────────
@@ -276,6 +372,54 @@ class TextEnricher:
 
         return db
 
+    def _merge_relations_into_database(
+        self,
+        entity_database: Dict[str, Any],
+        all_section_relations: List[List[Dict]],
+    ) -> None:
+        """
+        将 Step 2 提取的关系合并到已有的 entity_database 中。
+
+        关系的 source/target 通过别名反查表映射到 canonical name，
+        按 (source_canonical, target_canonical, relation) 去重。
+        """
+        # 构建别名反查表
+        alias_to_canonical: Dict[str, str] = {}
+        for canonical, entry in entity_database.items():
+            alias_to_canonical[canonical] = canonical
+            for alias in entry.get('aliases', []):
+                alias_to_canonical[alias] = canonical
+
+        for section_rels in all_section_relations:
+            for rel in section_rels:
+                if not isinstance(rel, dict):
+                    continue
+                source = (rel.get('source') or '').strip()
+                target = (rel.get('target') or '').strip()
+                relation = (rel.get('relation') or '').strip()
+                if not source or not target or not relation:
+                    continue
+
+                # 将 source 映射到 canonical name
+                source_canonical = alias_to_canonical.get(source)
+                if not source_canonical:
+                    continue
+                target_canonical = alias_to_canonical.get(target, target)
+
+                entry = entity_database.get(source_canonical)
+                if not entry:
+                    continue
+
+                # 按 (target, relation) 去重
+                existing_rels = {
+                    (r['target'], r['relation']) for r in entry['relationships']
+                }
+                if (target_canonical, relation) not in existing_rels:
+                    entry['relationships'].append({
+                        'target': target_canonical,
+                        'relation': relation,
+                    })
+
     # ──────────────────────────────────────────────────────────────
     # 5. B：补全 FalkorDB 空 summary
     # ──────────────────────────────────────────────────────────────
@@ -286,11 +430,11 @@ class TextEnricher:
         entity_database: Dict[str, Any],
     ) -> int:
         """
-        用 entity_database 的预提取信息充实 FalkorDB 中所有节点的 summary。
+        用 entity_database 的预提取信息**仅填充空 summary 节点**。
 
-        - 空 summary 节点：直接写入 entity_database 的 description + key_facts
-        - 非空 summary 节点：将 entity_database 的信息与 Graphiti 的 summary 合并
-          （entity_database 来自 10K 段落窗口，通常比 Graphiti 1500 字 chunk 提取的更完整）
+        Graphiti 会在逐 chunk 处理时增量构建 summary（每次把已有 summary + 新 chunk
+        一起交给 LLM 生成更新版本），其质量优于 entity_database 从 10K 段落一次性
+        提取的描述。因此只在 Graphiti 未能生成 summary 时才用 entity_database 兜底。
 
         返回更新的节点数量。
         """
@@ -305,17 +449,19 @@ class TextEnricher:
         )
         graph = db.select_graph(group_id)
 
-        # 查出所有节点（不限于空 summary）
+        # 只查空 summary 的节点
         result = graph.query(
             "MATCH (n:Entity) WHERE n.name IS NOT NULL AND n.name <> '' "
-            "RETURN n.uuid, n.name, n.summary"
+            "AND (n.summary IS NULL OR n.summary = '') "
+            "RETURN n.uuid, n.name"
         )
-        all_nodes = [
-            (row[0], row[1], (row[2] or '').strip())
+        empty_nodes = [
+            (row[0], row[1])
             for row in result.result_set
             if row[0] and row[1]
         ]
-        if not all_nodes:
+        if not empty_nodes:
+            logger.info("enrich_graph_summaries: 无空 summary 节点，跳过")
             return 0
 
         # 构建别名反查表
@@ -326,7 +472,7 @@ class TextEnricher:
                 alias_to_canonical[alias] = canonical
 
         enriched = 0
-        for node_uuid, node_name, existing_summary in all_nodes:
+        for node_uuid, node_name in empty_nodes:
             canonical = alias_to_canonical.get(node_name)
             if not canonical:
                 continue
@@ -335,30 +481,16 @@ class TextEnricher:
             if not db_summary:
                 continue
 
-            if not existing_summary:
-                # 空节点：直接用 entity_database 的内容
-                new_summary = db_summary
-            else:
-                # 非空节点：entity_database 信息为主体，追加 Graphiti 的 summary 中的独有内容
-                # 避免简单拼接导致重复——如果 Graphiti 的 summary 已经是 entity_database 的子集则跳过
-                if existing_summary in db_summary or db_summary in existing_summary:
-                    if len(db_summary) >= len(existing_summary):
-                        new_summary = db_summary
-                    else:
-                        continue  # Graphiti 的更长，保留原样
-                else:
-                    new_summary = db_summary + '\n' + existing_summary
-
             try:
                 graph.query(
                     "MATCH (n:Entity {uuid: $uuid}) SET n.summary = $summary",
-                    {'uuid': node_uuid, 'summary': new_summary[:MAX_SUMMARY_WRITE]},
+                    {'uuid': node_uuid, 'summary': db_summary[:MAX_SUMMARY_WRITE]},
                 )
                 enriched += 1
             except Exception as e:
                 logger.warning(f"写回 summary 失败 ({node_name}): {e}")
 
-        logger.info(f"enrich_graph_summaries: 更新 {enriched}/{len(all_nodes)} 个节点")
+        logger.info(f"enrich_graph_summaries: 填充 {enriched}/{len(empty_nodes)} 个空 summary 节点")
         return enriched
 
     def _build_summary_from_entry(self, entry: Dict[str, Any]) -> str:

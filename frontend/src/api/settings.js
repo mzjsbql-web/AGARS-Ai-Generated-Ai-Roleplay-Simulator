@@ -65,3 +65,42 @@ export const updateEnvConfig = (data) => {
 export const fetchModels = (data) => {
   return service({ url: '/api/settings/fetch-models', method: 'post', data })
 }
+
+// ============================================================
+// Preset 管理
+// ============================================================
+
+/** 获取所有 preset 列表 */
+export const getPresets = () => {
+  return service({ url: '/api/settings/presets', method: 'get' })
+}
+
+/** 将当前设置保存为新 preset */
+export const createPreset = (data) => {
+  return service({ url: '/api/settings/presets', method: 'post', data })
+}
+
+/** 用当前设置覆盖已有 preset */
+export const updatePreset = (presetId, data) => {
+  return service({ url: `/api/settings/presets/${presetId}`, method: 'put', data })
+}
+
+/** 删除 preset */
+export const deletePreset = (presetId) => {
+  return service({ url: `/api/settings/presets/${presetId}`, method: 'delete' })
+}
+
+/** 应用 preset */
+export const applyPreset = (presetId) => {
+  return service({ url: `/api/settings/presets/${presetId}/apply`, method: 'post' })
+}
+
+/** 导出 preset 为 JSON */
+export const exportPreset = (presetId) => {
+  return service({ url: `/api/settings/presets/${presetId}/export`, method: 'get' })
+}
+
+/** 导入 preset */
+export const importPreset = (data) => {
+  return service({ url: '/api/settings/presets/import', method: 'post', data })
+}

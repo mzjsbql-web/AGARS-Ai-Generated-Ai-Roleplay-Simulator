@@ -13,7 +13,7 @@ from ..config import Config
 from ..utils.logger import get_logger
 from ..services.narrative_engine import NarrativeEngine, NarrativeStatus
 from ..services.narrative_profile_generator import NarrativeProfileGenerator
-from ..services.falkordb_entity_reader import read_entities_from_falkordb, read_entity_edges
+from ..services.falkordb_entity_reader import read_entities_from_falkordb, read_entity_edges, read_all_nodes_directory
 
 logger = get_logger('agars.api.narrative')
 
@@ -161,6 +161,9 @@ def _run_prepare(session_id, graph_id, player_uuid, entity_types, parallel_count
             required_uuids=[player_uuid] if player_uuid else None,
         )
 
+        # 获取全部节点目录（含非 agent 类型），用于记忆系统 known_nodes 判断
+        all_nodes_for_memory = read_all_nodes_directory(group_id=graph_id)
+
         # Step 2: 先生成世界地图（规范地名）
         with _prepare_lock:
             _prepare_tasks[task_id]["message"] = "正在生成世界地图（规范地点名称）..."
@@ -231,6 +234,7 @@ def _run_prepare(session_id, graph_id, player_uuid, entity_types, parallel_count
             progress_callback=progress_cb,
             valid_locations=valid_locations,
             entity_database=entity_database or None,
+            all_nodes=all_nodes_for_memory or None,
         )
 
         # Step 3.5: 整体位置分配（一次 LLM 调用，全局视角）
@@ -530,7 +534,7 @@ def add_narrative_profile(session_id):
 
 @narrative_bp.route('/<session_id>/profiles/<entity_uuid>', methods=['DELETE'])
 def delete_narrative_profile(session_id, entity_uuid):
-    """删除角色（同时清理 FalkorDB 节点及关联边）"""
+    """删除角色（可选是否同时清理 FalkorDB 节点及关联边）"""
     try:
         state = NarrativeEngine.get_session(session_id)
         if not state:
@@ -543,30 +547,35 @@ def delete_narrative_profile(session_id, entity_uuid):
         if not success:
             return jsonify({"success": False, "error": "角色不存在"}), 404
 
-        # 同时删除 FalkorDB 中的节点及关联边
-        graph_id = state.graph_id
-        if graph_id and entity_uuid and not entity_uuid.startswith('custom_'):
-            try:
-                from falkordb import FalkorDB
-                db = FalkorDB(
-                    host=Config.FALKORDB_HOST,
-                    port=Config.FALKORDB_PORT,
-                    password=Config.FALKORDB_PASSWORD or None,
-                )
-                graph = db.select_graph(graph_id)
-                graph.query(
-                    "MATCH (n:Entity {uuid: $uuid})-[r]-() DELETE r",
-                    {"uuid": entity_uuid}
-                )
-                graph.query(
-                    "MATCH (n:Entity {uuid: $uuid}) DELETE n",
-                    {"uuid": entity_uuid}
-                )
-                logger.info(f"FalkorDB 节点及关联边已删除: {entity_uuid}")
-            except Exception as graph_err:
-                logger.warning(f"FalkorDB 清理失败（不影响角色删除）: {graph_err}")
+        # keep_node=1 时仅删 profile，保留图谱节点
+        keep_node = request.args.get('keep_node', '0') == '1'
 
-        return jsonify({"success": True, "data": {"message": "角色已删除"}})
+        if not keep_node:
+            # 同时删除 FalkorDB 中的节点及关联边
+            graph_id = state.graph_id
+            if graph_id and entity_uuid and not entity_uuid.startswith('custom_'):
+                try:
+                    from falkordb import FalkorDB
+                    db = FalkorDB(
+                        host=Config.FALKORDB_HOST,
+                        port=Config.FALKORDB_PORT,
+                        password=Config.FALKORDB_PASSWORD or None,
+                    )
+                    graph = db.select_graph(graph_id)
+                    graph.query(
+                        "MATCH (n:Entity {uuid: $uuid})-[r]-() DELETE r",
+                        {"uuid": entity_uuid}
+                    )
+                    graph.query(
+                        "MATCH (n:Entity {uuid: $uuid}) DELETE n",
+                        {"uuid": entity_uuid}
+                    )
+                    logger.info(f"FalkorDB 节点及关联边已删除: {entity_uuid}")
+                except Exception as graph_err:
+                    logger.warning(f"FalkorDB 清理失败（不影响角色删除）: {graph_err}")
+
+        msg = "角色已删除" + ("（保留图谱节点）" if keep_node else "（含图谱节点）")
+        return jsonify({"success": True, "data": {"message": msg}})
 
     except Exception as e:
         logger.error(f"删除角色失败: {e}", exc_info=True)

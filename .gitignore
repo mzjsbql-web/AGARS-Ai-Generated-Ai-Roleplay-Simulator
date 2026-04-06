@@ -55,6 +55,10 @@ mytest/
 backend/prompts_config.json
 backend/narrative_engine_config.json
 
+# Preset（只跟踪默认 preset，忽略用户自建的）
+backend/presets/*.json
+!backend/presets/default.json
+
 # 日志文件
 backend/logs/
 *.log

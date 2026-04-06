@@ -238,14 +238,24 @@ class GraphBuilderService:
             _snippets.summary_instructions = """Guidelines:
 1. Output only factual content. Never explain what you're doing or mention limitations.
 2. Only use the provided messages and entity context to set attribute values.
-3. Keep the summary concise. STATE FACTS DIRECTLY IN UNDER 500 CHARACTERS.
-4. For Chinese text: write the summary in Chinese. Include identity, status, key traits, and important facts.
+3. Keep the summary concise. STATE FACTS DIRECTLY IN UNDER 800 CHARACTERS.
+4. For Chinese text: write the summary in Chinese.
+
+WHAT BELONGS IN A SUMMARY (实体描述性信息):
+- Identity: who/what the entity is (身份、类型、所属)
+- Stable traits: personality, abilities, appearance (性格、能力、外貌)
+- Current status: latest known state, location, condition (当前状态、位置、处境)
+- Key background: origin, history that defines the entity (背景、经历)
+
+WHAT DOES NOT BELONG IN A SUMMARY (应作为 edge/fact 提取的信息):
+- Specific events between two entities → these should be edges
+- Temporal actions (who did what to whom when) → these should be edges
+- Relationships with other entities (ally, enemy, mentor) → these should be edges
 
 Example summaries:
-BAD: "This entity appears in the text. Limited information is available."
-GOOD: "张三，年轻武士，性格沉默寡言，擅长剑术和火系魔法。师从李四，曾击败魔王。目前身受重伤，隐居山中疗养。"
-GOOD: "皇家军团，帝国最精锐的军事力量，驻守王都北门。由将军王五统率，兵力约三千人。近期与北方蛮族爆发冲突。"
-GOOD: "User attended Q3 planning meeting with sales team on March 15."
+BAD: "张三在第三章中与李四战斗并获胜。后来他与王五结盟对抗魔王。" (these are events/relationships, not summary)
+GOOD: "张三，年轻武士，性格沉默寡言，擅长剑术和火系魔法。目前身受重伤，隐居山中疗养。曾是皇家军团成员，后脱离独行。"
+GOOD: "皇家军团，帝国最精锐的军事力量，驻守王都北门。兵力约三千人，纪律严明，以重骑兵著称。近年因连续征战实力有所下降。"
 """
 
             # ── 3. Node 提取 prompt：追加中文叙事指导 ────────────────
@@ -259,16 +269,20 @@ GOOD: "User attended Q3 planning meeting with sales team on March 15."
                     content=messages[-1].content + """
 
 ADDITIONAL GUIDELINES FOR NARRATIVE TEXT (中文叙事文本补充规则):
-- The text may contain a header like [本段涉及实体：...] at the beginning. These are known entities — use them to help identify and resolve entity references.
+- The text may contain a header like [本段涉及实体：...已知关系：...] at the beginning. These are pre-extracted entities — use them to identify and resolve entity references in the text.
 - For Chinese names: a character may be referred to by full name (张三丰), surname (张), title (掌门), or nickname (老张). Extract using the most complete/formal name.
 - Extract ALL named characters, organizations, locations, and significant items — not just "main" entities. Minor characters are also important for the knowledge graph.
 - If a pronoun clearly refers to a known entity, resolve it to that entity's name.
+
+Example: Given text "老张拔剑迎向敌人，身旁的小李紧随其后。二人冲入了皇城大门。"
+→ Extract: "张三" (if header says 老张=张三), "李四" (if header says 小李=李四), "皇城"
+→ Do NOT extract: "敌人" (too vague), "大门" (not significant)
 """,
                 )
                 return messages
             _extract_nodes.versions['extract_text'] = _patched_extract_text
 
-            # ── 4. Edge 提取 prompt：放宽隐含关系提取 ────────────────
+            # ── 4. Edge 提取 prompt：利用预提取关系 + 中文叙事适配 ──
             import graphiti_core.prompts.extract_edges as _extract_edges
             _orig_edge = _extract_edges.versions['edge']
 
@@ -279,13 +293,35 @@ ADDITIONAL GUIDELINES FOR NARRATIVE TEXT (中文叙事文本补充规则):
                     content=messages[-1].content + """
 
 ADDITIONAL RULES FOR NARRATIVE TEXT (中文叙事文本补充规则):
-- In narrative text, many relationships are IMPLIED through actions rather than stated explicitly.
-  Examples of implicit relationships that SHOULD be extracted:
-  · "二人并肩走过长街" → COMPANION or ALLY relationship
-  · "她低头回避他的目光" → some form of relationship (AVOIDS, FEARS, or RESPECTS)
-  · "他想起师父曾说的话" → MENTORED_BY or STUDENT_OF relationship
-- When the text header [本段涉及实体：...] provides entity descriptions, use them to better identify entity names in the text.
-- Prefer creating MORE edges rather than fewer — missing an edge is worse than having a slightly redundant one, because missing edges cannot be recovered.
+
+1. PRE-EXTRACTED RELATIONSHIPS:
+   The text may start with a header like [本段涉及实体：...已知关系：...].
+   The "已知关系" section lists relationships pre-extracted from a broader context window.
+   - You MUST extract these relationships as edges if they are supported by the current text.
+   - Use them as strong hints — they tell you WHAT relationships exist; your job is to find the textual evidence and extract with proper detail (fact description, temporal info).
+   - If a pre-extracted relationship is not supported by the current text, skip it.
+
+2. IMPLICIT RELATIONSHIPS IN NARRATIVE:
+   In narrative text, relationships are often implied through actions rather than stated directly.
+   Examples:
+   · "二人并肩走过长街" → COMPANION or ALLIED_WITH
+   · "他想起师父曾说的话" → MENTORED_BY
+   · "她将信物交给了他" → ENTRUSTED or GAVE_TO
+   Extract these as edges. When the relationship type is ambiguous, use INTERACTS_WITH as a fallback relation_type.
+
+3. ENTITY NAME RESOLUTION:
+   Use the entity descriptions and aliases from the [本段涉及实体：...] header to correctly match character references to their full names in the ENTITIES list.
+
+4. SINGLE-ENTITY FACTS:
+   Facts about a single entity (e.g., "张三擅长剑术") cannot be edges — those belong in the entity summary. Only extract facts that involve TWO distinct entities.
+
+5. EXAMPLE:
+   Text: "张三拔剑挡在李四面前，替他挡下了魔王的致命一击。"
+   Header says: 已知关系：张三 → 师从 → 李四
+   Expected edges:
+   - source=张三, target=李四, relation_type=PROTECTED, fact="张三替李四挡下了魔王的致命一击"
+   - source=张三, target=魔王, relation_type=FOUGHT_AGAINST, fact="张三与魔王交战，挡下其致命一击"
+   - source=张三, target=李四, relation_type=MENTORED_BY, fact="张三师从李四" (from pre-extracted relationship, supported by the protective act implying a close mentor-student bond)
 """,
                 )
                 return messages

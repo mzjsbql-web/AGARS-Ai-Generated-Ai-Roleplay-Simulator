@@ -24,7 +24,7 @@ from ..utils.logger import get_logger
 from .narrative_profile_generator import NarrativeCharacterProfile
 from .prompt_config import get_system, get_template, safe_render, get_llm_params
 from .narrative_engine_config import get_setting
-from .falkordb_entity_reader import search_entity_facts_by_name, search_entity_context
+from .falkordb_entity_reader import search_entity_facts_by_name, search_entity_context, read_nodes_by_uuids
 
 logger = get_logger('agars.narrative_engine')
 
@@ -1252,6 +1252,121 @@ class NarrativeEngine:
             return ""
 
     @classmethod
+    def _recall_memory(
+        cls,
+        state: NarrativeState,
+        agent: Dict,
+        personality: str,
+        goals_str: str,
+        location: str,
+        current_world_time: str,
+        same_loc_str: str,
+        recent_text: str,
+        directive_str: str,
+    ) -> str:
+        """
+        记忆检索（两轮调用的第一轮）：
+        根据角色的 known_nodes 和当前场景，让 LLM 选出此刻最相关的记忆节点，
+        然后从 FalkorDB 查询这些节点的详情，返回格式化的记忆文本。
+        """
+        agent_name = agent.get("name", "NPC")
+        known_nodes = agent.get("known_nodes", [])
+        if not known_nodes:
+            return "（无额外记忆）"
+
+        # 构建已知节点目录（用于 LLM 选择）
+        # 先尝试从缓存取全部节点信息，避免反复查库
+        all_nodes_cache_key = f"_all_nodes_{state.graph_id}"
+        all_nodes_map = getattr(cls, all_nodes_cache_key, None)
+        if all_nodes_map is None:
+            try:
+                from .falkordb_entity_reader import read_all_nodes_directory
+                all_nodes_list = read_all_nodes_directory(group_id=state.graph_id)
+                all_nodes_map = {n["uuid"]: n for n in all_nodes_list}
+                setattr(cls, all_nodes_cache_key, all_nodes_map)
+            except Exception as e:
+                logger.warning(f"记忆检索：获取节点目录失败: {e}")
+                return "（无额外记忆）"
+
+        # 只列出角色已知的节点
+        dir_lines = []
+        for uuid in known_nodes:
+            nd = all_nodes_map.get(uuid)
+            if nd:
+                n_labels = [l for l in nd.get("labels", []) if l not in ("Entity", "Node")]
+                type_str = n_labels[0] if n_labels else "未分类"
+                summary_short = (nd.get("summary", "") or "")[:50]
+                dir_lines.append(f"- [{uuid}] {nd['name']}（{type_str}）：{summary_short}")
+        if not dir_lines:
+            return "（无额外记忆）"
+
+        known_nodes_directory = "\n".join(dir_lines)
+
+        # 第一轮 LLM 调用：选择要召回的记忆
+        recall_prompt = safe_render(get_template('memory_recall'), {
+            'agent_name': agent_name,
+            'personality': personality,
+            'goals': goals_str or '无明确目标',
+            'location': location,
+            'temperament': agent.get('temperament', '平和'),
+            'world_time': current_world_time,
+            'same_loc_agents': same_loc_str,
+            'recent_text': recent_text or '（暂无事件）',
+            'directive': directive_str,
+            'known_nodes_directory': known_nodes_directory,
+        })
+
+        try:
+            _p = get_llm_params('memory_recall')
+            recall_result = get_client_for_prompt('memory_recall').chat_json(
+                messages=[
+                    {"role": "system", "content": get_system('memory_recall')},
+                    {"role": "user", "content": recall_prompt}
+                ],
+                temperature=_p['temperature'],
+                max_tokens=_p['max_tokens']
+            )
+        except Exception as e:
+            logger.warning(f"记忆检索LLM调用失败 ({agent_name}): {e}")
+            return "（无额外记忆）"
+
+        recalled_uuids = recall_result.get("recalled_node_uuids", [])
+        recall_reason = recall_result.get("recall_reason", "")
+        if recall_reason:
+            logger.debug(f"记忆检索 ({agent_name}): {recall_reason}")
+
+        if not recalled_uuids:
+            return "（无额外记忆）"
+
+        # 验证 UUID 有效性：只保留确实在 known_nodes 中的
+        valid_recalled = [u for u in recalled_uuids if u in known_nodes][:8]
+        if not valid_recalled:
+            return "（无额外记忆）"
+
+        # 查询召回节点的详细信息
+        try:
+            recalled_nodes = read_nodes_by_uuids(
+                group_id=state.graph_id,
+                uuids=valid_recalled,
+            )
+        except Exception as e:
+            logger.warning(f"记忆检索：查询节点详情失败: {e}")
+            return "（无额外记忆）"
+
+        # 格式化为记忆文本
+        memory_parts = []
+        for nd in recalled_nodes:
+            nd_name = nd.get("name", "")
+            nd_summary = nd.get("summary", "")
+            nd_facts = nd.get("related_facts", [])
+            part = f"【{nd_name}】{nd_summary}"
+            if nd_facts:
+                part += "\n" + "\n".join(f"  - {f}" for f in nd_facts[:4])
+            memory_parts.append(part)
+
+        return "\n\n".join(memory_parts) if memory_parts else "（无额外记忆）"
+
+    @classmethod
     def _process_npc_turn(
         cls,
         state: NarrativeState,
@@ -1308,7 +1423,28 @@ class NarrativeEngine:
         backstory = (agent.get('bio') or agent.get('backstory') or '')[:200]
         goals_raw = agent.get('goals') or agent.get('interested_topics') or []
         goals_str = ', '.join(goals_raw) if isinstance(goals_raw, list) else str(goals_raw)
+        directive_str = (
+            f"（剧情规划建议：{agent.get('_directive')}。仅供参考，可根据角色性格���情境自由发挥）"
+            if agent.get('_directive') else '（无特别提示，自由行动）'
+        )
 
+        # ====== 第一轮：记忆检索 ======
+        recalled_memory_text = "（无额外记忆）"
+        known_nodes = agent.get('known_nodes', [])
+        if known_nodes:
+            recalled_memory_text = cls._recall_memory(
+                state=state,
+                agent=agent,
+                personality=personality,
+                goals_str=goals_str,
+                location=location,
+                current_world_time=current_world_time,
+                same_loc_str=same_loc_str,
+                recent_text=recent_text,
+                directive_str=directive_str,
+            )
+
+        # ====== ���二轮：���动生成（注入召回的记忆） ======
         prompt = safe_render(get_template('npc_action'), {
             'agent_name': agent_name,
             'world_time': current_world_time,
@@ -1324,7 +1460,8 @@ class NarrativeEngine:
             'my_recent_actions': my_recent_actions_text,
             'recent_text': recent_text or '（暂无事件）',
             'graph_context': graph_context or '（无图谱信息）',
-            'directive': f"（剧情规划建议：{agent.get('_directive')}。仅供参考，可根据角色性格和情境自由发挥）" if agent.get('_directive') else '（无特别提示，自由行动）',
+            'recalled_memory': recalled_memory_text,
+            'directive': directive_str,
         })
 
         try:
@@ -1372,8 +1509,13 @@ class NarrativeEngine:
             except (IndexError, ValueError):
                 pass
 
-        # 评估事件重要性
-        importance = cls._rate_event_importance(action_text, llm)
+        # 评估事件重要性 + 知识更新 + 性格变化
+        eval_result = cls._rate_event_importance(
+            action_text, llm, agent_name=agent_name,
+            agent_known_nodes=known_nodes,
+            graph_id=state.graph_id,
+        )
+        importance = eval_result["importance"]
 
         event = NarrativeEvent(
             turn_number=state.current_turn,
@@ -1392,28 +1534,101 @@ class NarrativeEngine:
         state.all_events.append(event_dict)
         state.agent_last_acted[agent_uuid] = state.current_turn
 
-        # 高重要性事件写入图谱
-        if importance >= Config.NARRATIVE_IMPORTANCE_THRESHOLD and zep_client:
-            cls._write_event_to_graph(event, state.graph_id, zep_client)
+        # 高重要性事件：写入图谱 + 更新角色记忆和 profile
+        if importance >= Config.NARRATIVE_IMPORTANCE_THRESHOLD:
+            if zep_client:
+                cls._write_event_to_graph(event, state.graph_id, zep_client)
+
+            # 更新角色已知节点（new_knowledge）
+            new_knowledge = eval_result.get("new_knowledge", [])
+            if new_knowledge and known_nodes is not None:
+                existing_set = set(known_nodes)
+                for nk_uuid in new_knowledge:
+                    if nk_uuid not in existing_set:
+                        known_nodes.append(nk_uuid)
+                        existing_set.add(nk_uuid)
+                agent['known_nodes'] = known_nodes
+                logger.debug(f"记忆更新 ({agent_name}): +{len(new_knowledge)} 节点")
+
+            # 更新角色 profile（profile_change）
+            profile_change = eval_result.get("profile_change")
+            if profile_change and isinstance(profile_change, dict):
+                for field_name, new_value in profile_change.items():
+                    if field_name in ('goals', 'temperament', 'personality', 'speech_style'):
+                        agent[field_name] = new_value
+                        logger.info(f"角色演化 ({agent_name}): {field_name} → {new_value}")
 
         logger.debug(f"NPC行动: {agent_name} (重要性={importance:.2f}): {action_text[:80]}")
 
     @classmethod
-    def _rate_event_importance(cls, action_text: str, llm: LLMClient) -> float:
-        """评估事件重要性 (0-1)"""
+    def _rate_event_importance(
+        cls,
+        action_text: str,
+        llm: LLMClient,
+        agent_name: str = "",
+        agent_known_nodes: Optional[List[str]] = None,
+        graph_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        评估事件重要性 (0-1)，同时判断新知识获取和角色性格变化。
+
+        Returns:
+            {"importance": float, "new_knowledge": [str], "profile_change": dict|None}
+        """
+        default = {"importance": 0.5, "new_knowledge": [], "profile_change": None}
+
+        # 构建 unknown_nodes_nearby：角色尚未知道的节点
+        unknown_nodes_text = "（无）"
+        known_set = set(agent_known_nodes or [])
+        if graph_id and known_set:
+            try:
+                all_nodes_cache_key = f"_all_nodes_{graph_id}"
+                all_nodes_map = getattr(cls, all_nodes_cache_key, None)
+                if all_nodes_map is None:
+                    from .falkordb_entity_reader import read_all_nodes_directory
+                    all_nodes_list = read_all_nodes_directory(group_id=graph_id)
+                    all_nodes_map = {n["uuid"]: n for n in all_nodes_list}
+                    setattr(cls, all_nodes_cache_key, all_nodes_map)
+
+                unknown_lines = []
+                for uid, nd in all_nodes_map.items():
+                    if uid not in known_set:
+                        n_name = nd.get("name", "")
+                        n_summary = (nd.get("summary", "") or "")[:40]
+                        unknown_lines.append(f"- [{uid}] {n_name}：{n_summary}")
+                if unknown_lines:
+                    unknown_nodes_text = "\n".join(unknown_lines[:30])
+            except Exception as e:
+                logger.debug(f"构建未知节点列表失败: {e}")
+
         try:
             _p = get_llm_params('event_importance')
             result = get_client_for_prompt('event_importance').chat_json(
                 messages=[
                     {"role": "system", "content": get_system('event_importance')},
-                    {"role": "user", "content": safe_render(get_template('event_importance'), {"action_text": action_text})}
+                    {"role": "user", "content": safe_render(get_template('event_importance'), {
+                        "action_text": action_text,
+                        "agent_name": agent_name or "未知",
+                        "agent_known_nodes": ", ".join(agent_known_nodes[:20]) if agent_known_nodes else "（无）",
+                        "unknown_nodes_nearby": unknown_nodes_text,
+                    })}
                 ],
                 temperature=_p['temperature'],
                 max_tokens=_p['max_tokens']
             )
-            return max(0.0, min(1.0, float(result.get("importance", 0.5))))
+            importance = max(0.0, min(1.0, float(result.get("importance", 0.5))))
+            new_knowledge = result.get("new_knowledge", [])
+            # 验证 new_knowledge 中的 UUID 确实在 unknown 节点中
+            if new_knowledge and known_set:
+                new_knowledge = [u for u in new_knowledge if u not in known_set]
+            profile_change = result.get("profile_change")
+            return {
+                "importance": importance,
+                "new_knowledge": new_knowledge,
+                "profile_change": profile_change,
+            }
         except Exception:
-            return 0.5
+            return default
 
     @classmethod
     def _write_event_to_graph(cls, event: NarrativeEvent, graph_id: str, zep_client: Optional[Zep]):
@@ -1993,6 +2208,14 @@ class NarrativeEngine:
 
         # === 根据实体类型同步引擎状态 ===
         if entity_type == "character":
+            # 新角色的 known_nodes：默认知道自己 + 关联的已有实体
+            new_char_known = [entity_uuid]
+            for node_name in related_existing_nodes:
+                match_p = next((p for p in all_profiles if p.get("name") == node_name), None)
+                if match_p:
+                    new_char_known.append(match_p.get("entity_uuid", ""))
+            new_char_known = [u for u in new_char_known if u]
+
             profile_dict = {
                 "entity_uuid": entity_uuid,
                 "name": entity_name,
@@ -2005,6 +2228,7 @@ class NarrativeEngine:
                 "relationships": entity_data.get("relationships", []),
                 "abilities": entity_data.get("abilities", []),
                 "is_player": False,
+                "known_nodes": new_char_known,
             }
             cls.add_profile(state.session_id, profile_dict)
             state.agent_locations[entity_uuid] = profile_dict["current_location"]
@@ -2194,6 +2418,32 @@ class NarrativeEngine:
                 )
             except Exception:
                 pass
+
+        # === 更新记忆系统 ===
+        # 1. 使节点目录缓存失效（新节点已写入 FalkorDB）
+        all_nodes_cache_key = f"_all_nodes_{state.graph_id}"
+        if hasattr(cls, all_nodes_cache_key):
+            delattr(cls, all_nodes_cache_key)
+
+        # 2. 同地点角色 + 玩家自动获知新实体
+        new_entity_location = (
+            entity_data.get("current_location", player_location) if entity_type == "character"
+            else entity_data.get("location", player_location) if entity_type == "item"
+            else player_location
+        )
+        for p in all_profiles:
+            p_uuid = p.get("entity_uuid", "")
+            p_loc = state.agent_locations.get(p_uuid, "")
+            should_know = (
+                p.get("is_player")  # 玩家始终知道
+                or p_loc == new_entity_location  # 同地点角色知道
+                or p_uuid in [r.get("entity_uuid", "") for r in entity_data.get("relationships", []) if isinstance(r, dict)]
+            )
+            if should_know:
+                p_known = p.get("known_nodes", [])
+                if entity_uuid not in p_known:
+                    p_known.append(entity_uuid)
+                    p["known_nodes"] = p_known
 
         logger.info(f"新实体已加入引擎: [{entity_type}] {entity_name} ({entity_uuid})")
 

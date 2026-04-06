@@ -37,7 +37,7 @@ def safe_render(template: str, variables: Dict[str, Any]) -> str:
 
 # 全局默认 LLM 参数（可被各 prompt 的 per-key 默认值或用户覆盖值覆盖）
 DEFAULT_TEMPERATURE: float = 1.0
-DEFAULT_MAX_TOKENS: int = 4096
+DEFAULT_MAX_TOKENS: int = 32768
 
 # ============================================================
 # Prompt 变量参考表
@@ -89,6 +89,10 @@ PROMPT_VARIABLES: Dict[str, list] = {
         {"name": "is_player_status",    "description": "是否玩家角色的标记"},
         {"name": "full_context",        "description": "角色的完整图谱上下文信息"},
         {"name": "action_text",         "description": "待评估重要性的事件文本"},
+        {"name": "all_nodes_directory", "description": "图谱中所有节点的精简目录（uuid + name + 一句话summary），用于 profile 生成时让 LLM 判断角色已知节点"},
+        {"name": "known_nodes_directory", "description": "角色已知节点的精简目录（uuid + name），用于记忆检索时让 LLM 选择本轮召回的节点"},
+        {"name": "scene_context",       "description": "当前场景上下文（记忆检索时使用）"},
+        {"name": "recalled_memory",     "description": "第一轮记忆检索召回的节点详情和相关边"},
     ],
     "oasis": [
         {"name": "entity_name",         "description": "实体名称（个人 / 机构）"},
@@ -269,7 +273,6 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "label": "世界地图生成",
         "description": "从已知地点和世界设定生成空间邻接关系图",
         "system": "你是叙事世界的地图设计师。根据已知地点和世界设定，生成清晰合理的空间拓扑关系。返回严格的 JSON。",
-        "max_tokens": 8192,
         "template": """根据以下信息，为叙事世界生成地点邻接关系地图。
 
 【世界设定】
@@ -365,6 +368,9 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 【图谱上下文（角色关系与背景事实）】
 {graph_context}
 
+【角色此刻想起的记忆/知识】
+{recalled_memory}
+
 【剧情规划提示】
 {directive}
 
@@ -379,12 +385,69 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 直接输出行动描述即可："""
     },
 
+    "memory_recall": {
+        "category": "creative",
+        "label": "角色记忆检索",
+        "description": "NPC行动前的记忆检索：根据当前场景从角色已知节点中选择本轮相关的记忆",
+        "system": "你是叙事世界中的角色思维模拟器。根据当前情境判断角色会想起哪些记忆。返回 JSON。",
+        "template": """角色「{agent_name}」正在思考下一步行动。请根据当前情境，从该角色的已知记忆中选出此刻最可能浮现的记忆。
+
+【角色信息】
+- 性格: {personality}
+- 目标: {goals}
+- 当前位置: {location}
+- 气质: {temperament}
+
+【当前场景上下文】
+- 时间: {world_time}
+- 同一地点的角色：{same_loc_agents}
+- 最近发生的事件：
+{recent_text}
+- 剧情规划提示：{directive}
+
+【角色已知的知识/记忆目录】
+{known_nodes_directory}
+
+请从以上目录中选出角色此刻最可能想起的记忆节点（最多8个）。考虑：
+1. 与当前场景直接相关的记忆（如：看到某人 → 想起与此人的关系）
+2. 与当前目标相关的知识（如：要去某地 → 想起关于该地的信息）
+3. 被最近事件触发的关联记忆（如：听到某消息 → 想起相关事件）
+4. 不要选择与当前情境完全无关的记忆
+
+返回 JSON：
+{{
+  "recalled_node_uuids": ["uuid1", "uuid2", "..."],
+  "recall_reason": "简述为什么想起这些记忆（1-2句话，用于调试）"
+}}"""
+    },
+
     "event_importance": {
         "category": "creative",
         "label": "事件重要性评分",
-        "description": "控制事件重要性的评估标准",
-        "system": '你是一个叙事事件重要性评估器。返回 JSON 格式 {"importance": 0.0-1.0}',
-        "template": "评估以下叙事事件的重要性（0=日常琐事, 0.5=有意义的互动, 1.0=剧情转折）：\n\n{action_text}"
+        "description": "控制事件重要性的评估标准，同时判断角色知识更新和性格变化",
+        "system": "你是一个叙事事件评估器。评估事件重要性，并判断该事件是否让角色获得新知识或发生性格变化。返回 JSON。",
+        "template": """评估以下叙事事件：
+
+【事件】
+{action_text}
+
+【行动角色】{agent_name}
+【角色已知节点UUID列表】{agent_known_nodes}
+
+【图谱中该角色尚未知道的节点】
+{unknown_nodes_nearby}
+
+请返回 JSON：
+{{
+  "importance": 0.0到1.0的浮点数（0=日常琐事, 0.5=有意义的互动, 1.0=剧情转折）,
+  "new_knowledge": ["uuid1", "uuid2"],
+  "profile_change": null
+}}
+
+说明：
+- importance: 事件对叙事推进的重要程度
+- new_knowledge: 如果该事件使角色新获知了某些信息（如：角色听闻了某事、到达了新地方、与某人交谈获知秘密），从【尚未知道的节点】中选出相应的 UUID；若无新知识则返回空数组
+- profile_change: 如果该事件导致角色发生显著性格/目标转变（如：受到重大打击、顿悟、背叛等），返回需要更新的字段，如 {{"goals": ["新目标1"], "temperament": "从沉稳变为急躁"}}；通常为 null（大多数事件不会改变角色性格）"""
     },
 
     "player_scene": {
@@ -634,10 +697,13 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 【图谱上下文信息】
 {full_context}
 
+【世界知识节点目录】（以下是图谱中所有节点，包括角色、地点、物品、概念等）
+{all_nodes_directory}
+
 请生成以下 JSON 格式的角色档案（使用中文）：
 {{
   "profession": "职业或身份定位（1-4个词，如：朝廷官员、江湖侠客、商人掌柜，基于角色类型和图谱信息）",
-  "personality": "性格特征的详细描述（2-3句话）",
+  "personality": "性格特征的详细描述（2-3句话，强调行事风格和核心动机）",
   "goals": ["目标1", "目标2", "目标3"],
   "abilities": ["能力1", "能力2"],
   "backstory": "角色背景故事（3-5句话，基于图谱信息推断）",
@@ -646,7 +712,8 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     {{"name": "相关角色名", "relation": "关系描述"}}
   ],
   "speech_style": "说话风格描述（1-2句话）",
-  "temperament": "气质类型（如：沉稳、急躁、温和、冷酷等，1-2个词）"
+  "temperament": "气质类型（如：沉稳、急躁、温和、冷酷等，1-2个词）",
+  "known_nodes": ["uuid1", "uuid2", "..."]
 }}
 
 重要：
@@ -654,7 +721,12 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 - current_location 必须是【可用地点】中的某个名称，原文照抄，不要改写
 - 如果信息不足，可以合理推断但不要凭空捏造
 - relationships 只包含图谱中明确提到的关系
-- 【时间信息必须保留】若图谱事实中包含时间标记（如"一年前"、"三个月后"、"幼年时"、"上个月"等），必须将该时间信息原样保留并纳入 backstory 或 goals 中，作为角色记忆的组成部分，不得省略或模糊化"""
+- 【时间信息必须保留】若图谱事实中包含时间标记（如"一年前"、"三个月后"、"幼年时"、"上个月"等），必须将该时间信息原样保留并纳入 backstory 或 goals 中，作为角色记忆的组成部分，不得省略或模糊化
+- 【known_nodes 记忆系统】从【世界知识节点目录】中选出该角色应当知道的节点 UUID。判断依据：
+  1. 角色直接相关的节点（如自身、有关系的人物、所在地点）
+  2. 角色身份/职业推断应知的知识（如：官员知道朝廷制度；医师知道药物；本地人知道本地地理）
+  3. 角色背景推断应知的常识（如：受过教育的人知道历史典故；商人知道贸易路线）
+  4. 不要包含角色不可能知道的信息（如：远方陌生人的私密事件、角色未到过的秘密地点）"""
     },
 
     "narrative_location_assignment": {
@@ -738,12 +810,82 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 - age必须是有效的整数，gender必须是"male"或"female\""""
     },
 
+    "section_entity_extraction": {
+        "category": "advanced",
+        "label": "文本段落实体提取（第一步：仅实体）",
+        "description": "从文本段落中提取实体信息（不含关系），降低单次 LLM 认知负担，提升准确率",
+        "api_profile": "pro",
+        "system": "你是知识提取专家。从文本中提取实体，严格返回 JSON，不添加任何说明文字。",
+        "template": """从以下文本段落中提取所有具有实质信息的实体。本步骤只需提取实体本身的信息，无需提取关系。
+
+文本类型说明（请根据实际内容自动判断）：
+- 若为叙事型（小说、剧本、故事）：从情节、对话、行为中推断实体特征
+- 若为描述型（设定集、百科、词典）：直接提取词条内容
+- 若为历史/文献型：提取人物、事件、地点及时间关系
+- 其他类型同理，灵活处理
+
+【文本内容】
+{section_text}
+
+提取规则：
+1. 只提取文本中有实质描述的实体，不虚构、不推断未提及的内容
+2. 保留所有时间标记原文（如"一年前"、"三个月后"、"幼年时"），写入 key_facts
+3. aliases 列出该实体在本段中出现的所有称谓、别名、简称、外号
+4. description 控制在 150 字以内，综合该实体在本段的所有描述
+5. key_facts 列出具体事实（含时间标记），每条 50 字以内，最多 8 条
+6. 不需要提取 relationships，后续会单独处理
+
+请返回如下 JSON（无其他文字）：
+{{
+  "entities": [
+    {{
+      "name": "实体的主要名称",
+      "type": "人物/地点/组织/物品/概念/其他",
+      "aliases": ["别名1", "别名2"],
+      "description": "综合描述（150字以内）",
+      "key_facts": ["具体事实1（含时间标记如有）", "具体事实2"]
+    }}
+  ]
+}}"""
+    },
+
+    "section_relation_extraction": {
+        "category": "advanced",
+        "label": "文本段落关系提取（第二步：仅关系）",
+        "description": "基于已知实体列表，从文本段落中提取实体间关系。分步提取可显著提升关系提取的准确率",
+        "api_profile": "pro",
+        "system": "你是知识提取专家。基于已知实体列表从文本中提取实体间关系，严格返回 JSON，不添加任何说明文字。",
+        "template": """基于以下已知实体列表，从文本段落中提取实体间的关系。
+
+【已知实体列表】
+{entity_list}
+
+【文本内容】
+{section_text}
+
+提取规则：
+1. 只提取已知实体之间的关系，source 和 target 必须是上面列表中的实体名称
+2. 只提取文本中明确描述或可直接推断的关系，不虚构
+3. relation 用简洁的中文描述，含时间标记（如有）
+4. 每个实体最多 8 条关系
+
+请返回如下 JSON（无其他文字）：
+{{
+  "relationships": [
+    {{
+      "source": "实体名称A",
+      "target": "实体名称B",
+      "relation": "关系描述（含时间如有）"
+    }}
+  ]
+}}"""
+    },
+
     "section_extraction": {
         "category": "advanced",
-        "label": "文本段落实体提取",
-        "description": "从任意类型文本段落中提取实体信息，兼容小说、设定集、剧本、历史文献等",
+        "label": "文本段落实体提取（旧版一体式，已弃用）",
+        "description": "已拆分为 section_entity_extraction + section_relation_extraction 两步提取",
         "api_profile": "pro",
-        "max_tokens": 8192,
         "system": "你是知识提取专家。从文本中提取实体及其关系，严格返回 JSON，不添加任何说明文字。",
         "template": """从以下文本段落中提取所有具有实质信息的实体。
 
@@ -785,8 +927,6 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "category": "advanced",
         "label": "发送内容包装 · 图谱构建",
         "description": "对图谱构建相关的 LLM 调用（实体提取、关系提取、节点去重、摘要生成、自定义实体类型等）进行多轮对话包装。messages 数组支持任意轮数，role 填 user 或 assistant（会自动适配不同 API 的角色名称），{user_content} 会替换为实际发送文本。留空则直接发送原始内容。",
-        "system": "",
-        "template": "",
         "messages": [],
     },
 
@@ -794,8 +934,6 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "category": "advanced",
         "label": "发送内容包装 · 通用 LLM",
         "description": "对通用 LLM 调用（NPC 行动生成、叙事生成、段落实体预提取、剧情规划、报告生成等）进行多轮对话包装。messages 数组支持任意轮数，role 填 user 或 assistant（会自动适配不同 API 的角色名称），{user_content} 会替换为实际发送文本。留空则直接发送原始内容。",
-        "system": "",
-        "template": "",
         "messages": [],
     },
 
@@ -1089,7 +1227,6 @@ is_agent 字段规则：
 - 不要创造"抽象概念/情绪/主题/观点"作为实体类型（除非用户明确要求把它们当实体处理）。
 - 每个 entity_type 必须包含 is_agent 字段（true 或 false）。""",
         "template": "(此 prompt 模板由代码内部管理)",
-        "max_tokens": 16384,   # 本体 JSON 较长，需要更大的输出空间
     },
 }
 
@@ -1168,8 +1305,8 @@ def list_prompts() -> list:
             'category': default['category'],
             'label': default['label'],
             'description': default['description'],
-            'system': override.get('system', default['system']),
-            'template': override.get('template', default['template']),
+            'system': override.get('system', default.get('system', '')),
+            'template': override.get('template', default.get('template', '')),
             'temperature': override.get('temperature', default.get('temperature', DEFAULT_TEMPERATURE)),
             'max_tokens': override.get('max_tokens', default.get('max_tokens', DEFAULT_MAX_TOKENS)),
             'api_key': override.get('api_key', ''),

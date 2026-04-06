@@ -67,6 +67,7 @@
           :loading="graphLoading"
           :currentPhase="2"
           :highlightNodeId="highlightedNodeId"
+          :graphId="projectData?.graph_id"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />

@@ -15,6 +15,10 @@ from ..services.narrative_engine_config import (
     reset_setting as ne_reset_setting,
     DEFAULTS as NE_DEFAULTS,
 )
+from ..services.preset_manager import (
+    list_presets, get_preset, create_preset, update_preset as update_preset_meta,
+    delete_preset, apply_preset, import_preset, export_preset,
+)
 from ..utils.logger import get_logger
 
 # .env 文件路径（backend/app/api/ 向上三级到项目根）
@@ -260,4 +264,106 @@ def update_env_config():
         return jsonify({"success": True, "message": "已保存，新配置立即生效"})
     except Exception as e:
         logger.error(f"更新 env 配置失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ============================================================
+# Preset 管理
+# ============================================================
+
+@settings_bp.route('/presets', methods=['GET'])
+def get_all_presets():
+    """获取所有 preset 列表"""
+    try:
+        presets = list_presets()
+        return jsonify({"success": True, "data": presets})
+    except Exception as e:
+        logger.error(f"获取 preset 列表失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets', methods=['POST'])
+def create_new_preset():
+    """将当前设置保存为新 preset"""
+    try:
+        data = request.get_json() or {}
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({"success": False, "error": "需要提供 preset 名称"}), 400
+        description = data.get('description', '')
+        preset = create_preset(name, description)
+        return jsonify({"success": True, "data": preset})
+    except Exception as e:
+        logger.error(f"创建 preset 失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets/<preset_id>', methods=['PUT'])
+def update_existing_preset(preset_id):
+    """用当前设置覆盖已有 preset"""
+    try:
+        data = request.get_json() or {}
+        name = data.get('name')
+        description = data.get('description')
+        preset = update_preset_meta(preset_id, name=name, description=description)
+        return jsonify({"success": True, "data": preset})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"更新 preset 失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets/<preset_id>', methods=['DELETE'])
+def delete_existing_preset(preset_id):
+    """删除 preset"""
+    try:
+        delete_preset(preset_id)
+        return jsonify({"success": True, "message": "已删除"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"删除 preset 失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets/<preset_id>/apply', methods=['POST'])
+def apply_existing_preset(preset_id):
+    """应用 preset 到当前配置"""
+    try:
+        apply_preset(preset_id)
+        return jsonify({"success": True, "message": "Preset 已应用"})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"应用 preset 失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets/<preset_id>/export', methods=['GET'])
+def export_existing_preset(preset_id):
+    """导出 preset 为 JSON"""
+    try:
+        data = export_preset(preset_id)
+        return jsonify({"success": True, "data": data})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"导出 preset 失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@settings_bp.route('/presets/import', methods=['POST'])
+def import_new_preset():
+    """从 JSON 导入 preset"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "需要提供 preset JSON 数据"}), 400
+        preset = import_preset(data)
+        return jsonify({"success": True, "data": preset})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"导入 preset 失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500

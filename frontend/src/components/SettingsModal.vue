@@ -6,6 +6,24 @@
           <!-- Header -->
           <div class="settings-header">
             <h2>设置</h2>
+            <div class="preset-bar">
+              <select class="preset-select" v-model="selectedPresetId" @change="onPresetSelect">
+                <option value="">-- 选择 Preset --</option>
+                <option v-for="p in presets" :key="p.id" :value="p.id">
+                  {{ p.name }}{{ p.is_default ? ' (默认)' : '' }}
+                </option>
+              </select>
+              <button class="preset-btn preset-btn--apply" @click="doApplyPreset" :disabled="!selectedPresetId || presetBusy" title="应用选中的 Preset">应用</button>
+              <button class="preset-btn preset-btn--save" @click="doSavePreset" :disabled="presetBusy" title="将当前设置保存为新 Preset">保存为...</button>
+              <button class="preset-btn preset-btn--overwrite" @click="doOverwritePreset" :disabled="!selectedPresetId || isDefaultPreset || presetBusy" title="用当前设置覆盖选中的 Preset">覆盖</button>
+              <button class="preset-btn preset-btn--delete" @click="doDeletePreset" :disabled="!selectedPresetId || isDefaultPreset || presetBusy" title="删除选中的 Preset">删除</button>
+              <span class="preset-divider">|</span>
+              <button class="preset-btn preset-btn--export" @click="doExportPreset" :disabled="!selectedPresetId || presetBusy" title="导出 Preset 为 JSON 文件">导出</button>
+              <label class="preset-btn preset-btn--import" :class="{ disabled: presetBusy }" title="从 JSON 文件导入 Preset">
+                导入
+                <input type="file" accept=".json" style="display:none" @change="doImportPreset" :disabled="presetBusy" />
+              </label>
+            </div>
             <button class="close-btn" @click="$emit('close')">×</button>
           </div>
 
@@ -383,6 +401,7 @@
 import { ref, computed, watch } from 'vue'
 import { getPrompts, updatePrompt, resetPrompt, getLlmProfiles, getEnvConfig, updateEnvConfig, fetchModels, getPromptVariables } from '../api/settings'
 import { getNarrativeEngineSettings, updateNarrativeEngineSetting, resetNarrativeEngineSetting } from '../api/settings'
+import { getPresets, createPreset, updatePreset, deletePreset, applyPreset, exportPreset, importPreset } from '../api/settings'
 
 const props = defineProps({ visible: Boolean })
 const emit = defineEmits(['close'])
@@ -446,6 +465,128 @@ const envBuffer = ref({
   FALKORDB_HOST: '', FALKORDB_PORT: '', FALKORDB_PASSWORD: '',
 })
 
+// Preset 管理
+const presets = ref([])
+const selectedPresetId = ref('')
+const presetBusy = ref(false)
+const isDefaultPreset = computed(() => {
+  const p = presets.value.find(x => x.id === selectedPresetId.value)
+  return p?.is_default === true
+})
+
+async function fetchPresets() {
+  try {
+    const res = await getPresets()
+    presets.value = res.data || []
+  } catch (e) {
+    console.error('Failed to load presets', e)
+  }
+}
+
+function onPresetSelect() {
+  // 仅选择，不自动应用
+}
+
+async function doApplyPreset() {
+  if (!selectedPresetId.value) return
+  const p = presets.value.find(x => x.id === selectedPresetId.value)
+  if (!confirm(`确定应用 Preset「${p?.name || selectedPresetId.value}」？当前未保存的设置修改将被覆盖。`)) return
+  presetBusy.value = true
+  try {
+    await applyPreset(selectedPresetId.value)
+    await fetchAll()
+  } catch (e) {
+    alert('应用失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function doSavePreset() {
+  const name = prompt('请输入 Preset 名称:')
+  if (!name?.trim()) return
+  presetBusy.value = true
+  try {
+    const res = await createPreset({ name: name.trim() })
+    await fetchPresets()
+    if (res.data?.id) selectedPresetId.value = res.data.id
+  } catch (e) {
+    alert('保存失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function doOverwritePreset() {
+  if (!selectedPresetId.value || isDefaultPreset.value) return
+  const p = presets.value.find(x => x.id === selectedPresetId.value)
+  if (!confirm(`确定用当前设置覆盖 Preset「${p?.name}」？`)) return
+  presetBusy.value = true
+  try {
+    await updatePreset(selectedPresetId.value, {})
+    await fetchPresets()
+  } catch (e) {
+    alert('覆盖失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function doDeletePreset() {
+  if (!selectedPresetId.value || isDefaultPreset.value) return
+  const p = presets.value.find(x => x.id === selectedPresetId.value)
+  if (!confirm(`确定删除 Preset「${p?.name}」？此操作不可撤销。`)) return
+  presetBusy.value = true
+  try {
+    await deletePreset(selectedPresetId.value)
+    selectedPresetId.value = ''
+    await fetchPresets()
+  } catch (e) {
+    alert('删除失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function doExportPreset() {
+  if (!selectedPresetId.value) return
+  presetBusy.value = true
+  try {
+    const res = await exportPreset(selectedPresetId.value)
+    const json = JSON.stringify(res.data, null, 2)
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `preset-${res.data?.name || selectedPresetId.value}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    alert('导出失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function doImportPreset(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  presetBusy.value = true
+  try {
+    const text = await file.text()
+    const data = JSON.parse(text)
+    const res = await importPreset(data)
+    await fetchPresets()
+    if (res.data?.id) selectedPresetId.value = res.data.id
+  } catch (e) {
+    alert('导入失败: ' + (e.response?.data?.error || e.message))
+  } finally {
+    presetBusy.value = false
+    // 重置 file input，允许再次选择同一文件
+    event.target.value = ''
+  }
+}
+
 const isGoogleApi = computed(() => {
   const mode = (envBuffer.value.LLM_USE_GOOGLE_SDK || 'auto').toLowerCase()
   if (mode === 'true') return true
@@ -465,7 +606,7 @@ watch(() => props.visible, async (val) => {
 async function fetchAll() {
   loading.value = true
   try {
-    await Promise.all([fetchPrompts(), fetchNeSettings(), fetchLlmProfiles(), fetchEnvConfig(), fetchVarRef()])
+    await Promise.all([fetchPrompts(), fetchNeSettings(), fetchLlmProfiles(), fetchEnvConfig(), fetchVarRef(), fetchPresets()])
   } finally {
     loading.value = false
   }
@@ -647,8 +788,8 @@ async function resetNeAll() {
 /* Modal */
 .settings-modal {
   background: #fff;
-  width: 720px;
-  max-width: 92vw;
+  width: 780px;
+  max-width: 94vw;
   max-height: 85vh;
   border-radius: 8px;
   display: flex;
@@ -661,14 +802,17 @@ async function resetNeAll() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
+  padding: 12px 24px;
   border-bottom: 1px solid #e5e5e5;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .settings-header h2 {
   margin: 0;
   font-size: 18px;
   font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
   font-weight: 600;
+  flex-shrink: 0;
 }
 .close-btn {
   background: none;
@@ -681,6 +825,86 @@ async function resetNeAll() {
 }
 .close-btn:hover {
   color: #000;
+}
+
+/* Preset bar */
+.preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  margin: 0 16px;
+  flex-wrap: wrap;
+}
+.preset-select {
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Noto Sans SC', system-ui, sans-serif;
+  background: #fff;
+  min-width: 140px;
+  max-width: 200px;
+}
+.preset-select:focus {
+  outline: none;
+  border-color: #FF4500;
+}
+.preset-btn {
+  padding: 3px 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Noto Sans SC', system-ui, sans-serif;
+  cursor: pointer;
+  background: #fff;
+  color: #555;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.preset-btn:hover:not(:disabled):not(.disabled) {
+  border-color: #999;
+  color: #333;
+}
+.preset-btn:disabled, .preset-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.preset-btn--apply {
+  background: #FF4500;
+  color: #fff;
+  border-color: #FF4500;
+}
+.preset-btn--apply:hover:not(:disabled) {
+  background: #e03e00;
+  border-color: #e03e00;
+}
+.preset-btn--save {
+  background: #2d6a4f;
+  color: #fff;
+  border-color: #2d6a4f;
+}
+.preset-btn--save:hover:not(:disabled) {
+  background: #245a42;
+  border-color: #245a42;
+}
+.preset-btn--delete {
+  color: #c0392b;
+  border-color: #e0b0a8;
+}
+.preset-btn--delete:hover:not(:disabled) {
+  border-color: #c0392b;
+  background: #fdf0ee;
+}
+.preset-btn--import {
+  display: inline-flex;
+  align-items: center;
+}
+.preset-divider {
+  color: #ddd;
+  font-size: 14px;
+  margin: 0 2px;
+  user-select: none;
 }
 
 /* Loading */

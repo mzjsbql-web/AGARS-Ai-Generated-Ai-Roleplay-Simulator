@@ -62,10 +62,11 @@
     <main class="content-area">
       <!-- Left Panel: Graph -->
       <div class="panel-wrapper left" :style="leftPanelStyle">
-        <GraphPanel 
+        <GraphPanel
           :graphData="graphData"
           :loading="graphLoading"
           :currentPhase="currentPhase"
+          :graphId="projectData?.graph_id"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />

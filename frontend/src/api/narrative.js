@@ -203,6 +203,8 @@ export const addNarrativeProfile = (sessionId, data) => {
   return requestWithRetry(() => service.post(`/api/narrative/${sessionId}/profiles`, data), 3, 1000)
 }
 
-export const deleteNarrativeProfile = (sessionId, entityUuid) => {
-  return service.delete(`/api/narrative/${sessionId}/profiles/${entityUuid}`)
+export const deleteNarrativeProfile = (sessionId, entityUuid, keepNode = false) => {
+  return service.delete(`/api/narrative/${sessionId}/profiles/${entityUuid}`, {
+    params: keepNode ? { keep_node: '1' } : {}
+  })
 }

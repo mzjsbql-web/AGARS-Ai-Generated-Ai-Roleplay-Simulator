@@ -35,6 +35,7 @@ class NarrativeCharacterProfile:
     relationships: List[Dict[str, str]] = field(default_factory=list)
     speech_style: str = ""
     temperament: str = ""
+    known_nodes: List[str] = field(default_factory=list)  # 角色已知的 node uuid 列表（记忆系统）
     raw_graph_context: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -218,6 +219,7 @@ class NarrativeProfileGenerator:
         is_player: bool = False,
         valid_locations: Optional[List[str]] = None,
         entity_database: Optional[Dict[str, Any]] = None,
+        all_nodes: Optional[List[Dict[str, Any]]] = None,
     ) -> NarrativeCharacterProfile:
         """
         从图谱实体生成叙事角色档案
@@ -279,6 +281,20 @@ class NarrativeProfileGenerator:
 
         full_context = "\n\n".join(context_parts) or "无额外上下文信息"
 
+        # 构建世界知识节点目录（用于记忆系统 known_nodes 判断）
+        if all_nodes:
+            dir_lines = []
+            for n in all_nodes:
+                n_uuid = n.get("uuid", "")
+                n_name = n.get("name", "")
+                n_summary = (n.get("summary", "") or "")[:60]
+                n_labels = [l for l in n.get("labels", []) if l not in ("Entity", "Node")]
+                type_str = n_labels[0] if n_labels else "未分类"
+                dir_lines.append(f"- [{n_uuid}] {n_name}（{type_str}）：{n_summary}")
+            all_nodes_directory = "\n".join(dir_lines)
+        else:
+            all_nodes_directory = "（无节点目录）"
+
         # 使用 LLM 生成角色档案
         is_player_status = "是（第一人称视角角色）" if is_player else "否（NPC）"
         if valid_locations:
@@ -291,6 +307,7 @@ class NarrativeProfileGenerator:
             'is_player_status': is_player_status,
             'valid_locations': locs_str,
             'full_context': full_context,
+            'all_nodes_directory': all_nodes_directory,
         })
 
         try:
@@ -341,6 +358,11 @@ class NarrativeProfileGenerator:
                     lr["source"] = "llm"
                     merged_rels.append(lr)
 
+            # 解析 known_nodes：验证 UUID 有效性
+            raw_known = result.get("known_nodes", [])
+            valid_uuids = {n.get("uuid") for n in (all_nodes or []) if n.get("uuid")}
+            known_nodes = [u for u in raw_known if u in valid_uuids]
+
             profile = NarrativeCharacterProfile(
                 entity_uuid=entity_uuid,
                 entity_type=entity_type,
@@ -356,6 +378,7 @@ class NarrativeProfileGenerator:
                 relationships=merged_rels,
                 speech_style=result.get("speech_style", ""),
                 temperament=result.get("temperament", ""),
+                known_nodes=known_nodes,
                 raw_graph_context=full_context[:2000]
             )
 
@@ -384,6 +407,7 @@ class NarrativeProfileGenerator:
         progress_callback: Optional[Callable] = None,
         valid_locations: Optional[List[str]] = None,
         entity_database: Optional[Dict[str, Any]] = None,
+        all_nodes: Optional[List[Dict[str, Any]]] = None,
     ) -> List[NarrativeCharacterProfile]:
         """
         批量生成角色档案
@@ -408,6 +432,7 @@ class NarrativeProfileGenerator:
                 is_player=is_player,
                 valid_locations=valid_locations,
                 entity_database=entity_database,
+                all_nodes=all_nodes,
             )
 
         completed = 0

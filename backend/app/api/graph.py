@@ -430,18 +430,36 @@ def build_graph():
                 builder = GraphBuilderService()
                 build_logger.info(f"[{task_id}] [计时] GraphBuilderService初始化: {_time.time()-phase_start:.1f}s")
 
-                # 按文件分块（保留来源信息）
+                # 按文件分块（保留来源信息）—— 使用语义切分
                 phase_start = _time.time()
                 task_manager.update_task(
                     task_id,
-                    message="文本分块中...",
+                    message="语义分块中（embedding）...",
                     progress=5
                 )
+                from ..services.semantic_chunker import semantic_chunk
+
                 file_sections = _parse_text_sections(text)
-                file_chunks = [
-                    (filename, TextProcessor.split_text(section_text, chunk_size=chunk_size, overlap=chunk_overlap))
-                    for filename, section_text in file_sections
-                ]
+                embedder = builder._graphiti.embedder
+                event_loop = builder._loop
+
+                file_chunks = []
+                for filename, section_text in file_sections:
+                    chunks = semantic_chunk(
+                        section_text,
+                        embedder=embedder,
+                        loop=event_loop,
+                        target_size=chunk_size,
+                    )
+                    if chunks is None:
+                        # embedding 失败，降级为按长度切分
+                        build_logger.warning(
+                            f"[{task_id}] 语义切分失败，降级为按长度切分: {filename}"
+                        )
+                        chunks = TextProcessor.split_text(
+                            section_text, chunk_size=chunk_size, overlap=chunk_overlap
+                        )
+                    file_chunks.append((filename, chunks))
 
                 # ── 方案C：分段结构化实体预提取 ──────────────────────────────
                 phase_start = _time.time()
@@ -488,23 +506,89 @@ def build_graph():
                             '|'.join(_re.escape(n) for n in entity_names)
                         )
 
+                        # 构建别名→canonical 反查表（用于关系匹配 + 别名替换）
+                        _alias_to_canonical: dict = {}
+                        for _canon, _ent in entity_database.items():
+                            _alias_to_canonical[_canon] = _canon
+                            for _a in _ent.get('aliases', []):
+                                _alias_to_canonical[_a] = _canon
+
+                        # 构建别名替换正则：只替换非 canonical 的别名
+                        _alias_only = [
+                            a for a, c in _alias_to_canonical.items() if a != c
+                        ]
+                        _alias_replace_pattern = None
+                        if _alias_only:
+                            # 按长度降序，避免短别名截断长别名
+                            _alias_only.sort(key=len, reverse=True)
+                            _alias_replace_pattern = _re.compile(
+                                '|'.join(_re.escape(a) for a in _alias_only)
+                            )
+
+                        def _replace_aliases(text: str) -> str:
+                            """将文本中的别名替换为 canonical name（轻量共指消解）"""
+                            if not _alias_replace_pattern:
+                                return text
+                            return _alias_replace_pattern.sub(
+                                lambda m: _alias_to_canonical[m.group(0)], text
+                            )
+
                         def _inject_headers(chunks):
                             result = []
                             for chunk in chunks:
-                                matches = list(dict.fromkeys(_pattern.findall(chunk)))[:6]
-                                if matches:
-                                    # 注入实体描述（不只是名字），给 Graphiti 更多上下文
-                                    lines = []
-                                    for m in matches:
-                                        entry = TextEnricher.lookup_entity(entity_database, m)
-                                        if entry and entry.get('description'):
-                                            lines.append(f"  {m}：{entry['description'][:80]}")
-                                        else:
-                                            lines.append(f"  {m}")
-                                    header = "[本段涉及实体：\n" + "\n".join(lines) + "\n]\n"
-                                    result.append(header + chunk)
-                                else:
-                                    result.append(chunk)
+                                matches = list(dict.fromkeys(_pattern.findall(chunk)))[:10]
+                                if not matches:
+                                    result.append(_replace_aliases(chunk))
+                                    continue
+
+                                # 收集本 chunk 出现的 canonical name 集合
+                                chunk_canonicals = set()
+                                for m in matches:
+                                    c = _alias_to_canonical.get(m)
+                                    if c:
+                                        chunk_canonicals.add(c)
+
+                                # 实体信息
+                                entity_lines = []
+                                for m in matches:
+                                    entry = TextEnricher.lookup_entity(entity_database, m)
+                                    if not entry:
+                                        entity_lines.append(f"  {m}")
+                                        continue
+                                    parts = [m]
+                                    aliases = entry.get('aliases', [])
+                                    if aliases:
+                                        parts[0] += f"（又称：{'、'.join(aliases[:4])}）"
+                                    desc = entry.get('description', '')
+                                    if desc:
+                                        parts.append(desc[:120])
+                                    entity_lines.append(f"  {'：'.join(parts)}")
+
+                                # 收集本 chunk 涉及实体之间的已知关系
+                                rel_lines = []
+                                for canon in chunk_canonicals:
+                                    entry = entity_database.get(canon, {})
+                                    for rel in entry.get('relationships', []):
+                                        target = rel.get('target', '')
+                                        # target 也要在本 chunk 中出现才注入
+                                        target_canon = _alias_to_canonical.get(target, target)
+                                        if target_canon in chunk_canonicals and target_canon != canon:
+                                            rel_lines.append(
+                                                f"  {canon} → {rel.get('relation', '?')} → {target_canon}"
+                                            )
+                                # 去重（A→关系→B 可能被两侧都触发）
+                                rel_lines = list(dict.fromkeys(rel_lines))[:8]
+
+                                header_parts = ["[本段涉及实体："]
+                                header_parts.extend(entity_lines)
+                                if rel_lines:
+                                    header_parts.append("已知关系：")
+                                    header_parts.extend(rel_lines)
+                                header_parts.append("]")
+                                # 对 chunk 正文做别名→canonical 替换（轻量共指消解）
+                                # header 不替换——保留别名信息供 LLM 参考
+                                normalized_chunk = _replace_aliases(chunk)
+                                result.append("\n".join(header_parts) + "\n" + normalized_chunk)
                             return result
 
                         file_chunks = [
@@ -1268,4 +1352,93 @@ def update_entity_edges(graph_id: str, entity_uuid: str):
 
     except Exception as e:
         logger.error(f"更新实体边失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@graph_bp.route('/edge/<graph_id>', methods=['POST'])
+def create_edge(graph_id: str):
+    """
+    在 FalkorDB 中创建一条新边
+    Request body: { source_uuid, target_uuid, name?, fact? }
+    """
+    try:
+        from falkordb import FalkorDB
+
+        data = request.get_json()
+        if not data or not data.get('source_uuid') or not data.get('target_uuid'):
+            return jsonify({"success": False, "error": "缺少 source_uuid 或 target_uuid"}), 400
+
+        db = FalkorDB(
+            host=Config.FALKORDB_HOST,
+            port=Config.FALKORDB_PORT,
+            password=Config.FALKORDB_PASSWORD or None,
+        )
+        graph = db.select_graph(graph_id)
+
+        import uuid as uuid_mod
+        edge_uuid = str(uuid_mod.uuid4())
+        edge_name = data.get('name', 'RELATES_TO') or 'RELATES_TO'
+        fact = data.get('fact', '')
+
+        graph.query(
+            "MATCH (s:Entity {uuid: $s_uuid}), (t:Entity {uuid: $t_uuid}) "
+            "CREATE (s)-[r:RELATES_TO {uuid: $uuid, name: $edge_name, fact: $fact}]->(t)",
+            {
+                "s_uuid": data['source_uuid'],
+                "t_uuid": data['target_uuid'],
+                "uuid": edge_uuid,
+                "edge_name": edge_name[:50],
+                "fact": fact[:500],
+            }
+        )
+
+        logger.info(f"FalkorDB 边已创建: {data['source_uuid']} → {data['target_uuid']}")
+        return jsonify({"success": True, "data": {"edge_uuid": edge_uuid, "message": "边已创建"}})
+
+    except Exception as e:
+        logger.error(f"创建边失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@graph_bp.route('/edge/<graph_id>/<edge_uuid>', methods=['PUT'])
+def update_edge(graph_id: str, edge_uuid: str):
+    """
+    更新 FalkorDB 中单条边的属性
+    Request body: { name?, fact? }
+    """
+    try:
+        from falkordb import FalkorDB
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "缺少请求体"}), 400
+
+        db = FalkorDB(
+            host=Config.FALKORDB_HOST,
+            port=Config.FALKORDB_PORT,
+            password=Config.FALKORDB_PASSWORD or None,
+        )
+        graph = db.select_graph(graph_id)
+
+        set_parts = []
+        params = {'uuid': edge_uuid}
+
+        if 'name' in data:
+            set_parts.append("r.name = $name")
+            params['name'] = data['name']
+        if 'fact' in data:
+            set_parts.append("r.fact = $fact")
+            params['fact'] = data['fact']
+
+        if set_parts:
+            graph.query(
+                f"MATCH ()-[r]->() WHERE r.uuid = $uuid SET {', '.join(set_parts)}",
+                params
+            )
+
+        logger.info(f"FalkorDB 边已更新: {edge_uuid}")
+        return jsonify({"success": True, "data": {"message": "边已更新"}})
+
+    except Exception as e:
+        logger.error(f"更新边失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500

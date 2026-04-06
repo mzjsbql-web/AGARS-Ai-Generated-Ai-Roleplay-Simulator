@@ -50,6 +50,7 @@
           :loading="graphLoading"
           :currentPhase="3"
           :isSimulating="isActive"
+          :graphId="projectData?.graph_id"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />

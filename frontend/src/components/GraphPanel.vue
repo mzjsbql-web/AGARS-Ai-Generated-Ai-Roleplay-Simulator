@@ -4,6 +4,12 @@
       <span class="panel-title">Graph Relationship Visualization</span>
       <!-- 顶部工具栏 (Internal Top Right) -->
       <div class="header-tools">
+        <button v-if="graphId" class="tool-btn add-btn" @click="openCreateNode" title="添加节点">
+          <span>+ Node</span>
+        </button>
+        <button v-if="graphId" class="tool-btn add-btn" @click="openCreateEdge" title="添加边">
+          <span>+ Edge</span>
+        </button>
         <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="刷新图谱">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
           <span class="btn-text">Refresh</span>
@@ -62,7 +68,15 @@
           <div v-if="selectedItem.type === 'node'" class="detail-content">
             <div class="detail-row">
               <span class="detail-label">Name:</span>
-              <span class="detail-value">{{ selectedItem.data.name }}</span>
+              <template v-if="editingField === 'node-name'">
+                <input class="inline-edit-input" v-model="editValue" @keyup.enter="saveEdit" @keyup.escape="cancelEdit" />
+                <button class="inline-edit-save" @click="saveEdit" :disabled="editSaving">✓</button>
+                <button class="inline-edit-cancel" @click="cancelEdit">✕</button>
+              </template>
+              <span v-else class="detail-value editable" @click="graphId && startEdit('node-name', selectedItem.data.name)">
+                {{ selectedItem.data.name }}
+                <span v-if="graphId" class="edit-hint">✎</span>
+              </span>
             </div>
             <div class="detail-row">
               <span class="detail-label">UUID:</span>
@@ -72,7 +86,7 @@
               <span class="detail-label">Created:</span>
               <span class="detail-value">{{ formatDateTime(selectedItem.data.created_at) }}</span>
             </div>
-            
+
             <!-- Properties -->
             <div class="detail-section" v-if="selectedItem.data.attributes && Object.keys(selectedItem.data.attributes).length > 0">
               <div class="section-title">Properties:</div>
@@ -83,13 +97,23 @@
                 </div>
               </div>
             </div>
-            
+
             <!-- Summary -->
-            <div class="detail-section" v-if="selectedItem.data.summary">
+            <div class="detail-section">
               <div class="section-title">Summary:</div>
-              <div class="summary-text">{{ selectedItem.data.summary }}</div>
+              <template v-if="editingField === 'node-summary'">
+                <textarea class="inline-edit-textarea" v-model="editValue" @keyup.escape="cancelEdit" rows="4"></textarea>
+                <div class="inline-edit-actions">
+                  <button class="inline-edit-save" @click="saveEdit" :disabled="editSaving">{{ editSaving ? '...' : '保存' }}</button>
+                  <button class="inline-edit-cancel" @click="cancelEdit">取消</button>
+                </div>
+              </template>
+              <div v-else class="summary-text editable" @click="graphId && startEdit('node-summary', selectedItem.data.summary)">
+                {{ selectedItem.data.summary || '(empty)' }}
+                <span v-if="graphId" class="edit-hint">✎</span>
+              </div>
             </div>
-            
+
             <!-- Labels -->
             <div class="detail-section" v-if="selectedItem.data.labels && selectedItem.data.labels.length > 0">
               <div class="section-title">Labels:</div>
@@ -159,22 +183,40 @@
               <div class="edge-relation-header">
                 {{ selectedItem.data.source_name }} → {{ selectedItem.data.name || 'RELATED_TO' }} → {{ selectedItem.data.target_name }}
               </div>
-              
+
               <div class="detail-row">
                 <span class="detail-label">UUID:</span>
                 <span class="detail-value uuid-text">{{ selectedItem.data.uuid }}</span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">Label:</span>
-                <span class="detail-value">{{ selectedItem.data.name || 'RELATED_TO' }}</span>
+                <template v-if="editingField === 'edge-name'">
+                  <input class="inline-edit-input" v-model="editValue" @keyup.enter="saveEdit" @keyup.escape="cancelEdit" />
+                  <button class="inline-edit-save" @click="saveEdit" :disabled="editSaving">✓</button>
+                  <button class="inline-edit-cancel" @click="cancelEdit">✕</button>
+                </template>
+                <span v-else class="detail-value editable" @click="graphId && startEdit('edge-name', selectedItem.data.name)">
+                  {{ selectedItem.data.name || 'RELATED_TO' }}
+                  <span v-if="graphId" class="edit-hint">✎</span>
+                </span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">Type:</span>
                 <span class="detail-value">{{ selectedItem.data.fact_type || 'Unknown' }}</span>
               </div>
-              <div class="detail-row" v-if="selectedItem.data.fact">
+              <div class="detail-row">
                 <span class="detail-label">Fact:</span>
-                <span class="detail-value fact-text">{{ selectedItem.data.fact }}</span>
+                <template v-if="editingField === 'edge-fact'">
+                  <textarea class="inline-edit-textarea" v-model="editValue" @keyup.escape="cancelEdit" rows="3"></textarea>
+                  <div class="inline-edit-actions">
+                    <button class="inline-edit-save" @click="saveEdit" :disabled="editSaving">{{ editSaving ? '...' : '保存' }}</button>
+                    <button class="inline-edit-cancel" @click="cancelEdit">取消</button>
+                  </div>
+                </template>
+                <span v-else class="detail-value fact-text editable" @click="graphId && startEdit('edge-fact', selectedItem.data.fact)">
+                  {{ selectedItem.data.fact || '(empty)' }}
+                  <span v-if="graphId" class="edit-hint">✎</span>
+                </span>
               </div>
               
               <!-- Episodes -->
@@ -198,8 +240,74 @@
             </template>
           </div>
         </div>
+
+        <!-- Create Node Panel -->
+        <div v-if="showCreateNode" class="detail-panel create-panel">
+          <div class="detail-panel-header">
+            <span class="detail-title">New Node</span>
+            <button class="detail-close" @click="showCreateNode = false">×</button>
+          </div>
+          <div class="detail-content">
+            <div class="detail-row">
+              <span class="detail-label">Name:</span>
+              <input class="inline-edit-input" v-model="createNodeForm.name" placeholder="节点名称" />
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Type:</span>
+              <input class="inline-edit-input" v-model="createNodeForm.entity_type" placeholder="如 Person, Location" />
+            </div>
+            <div class="detail-section">
+              <div class="section-title">Summary:</div>
+              <textarea class="inline-edit-textarea" v-model="createNodeForm.summary" rows="3" placeholder="节点描述"></textarea>
+            </div>
+            <div class="inline-edit-actions" style="margin-top:8px">
+              <button class="inline-edit-save" @click="submitCreateNode" :disabled="createSaving || !createNodeForm.name.trim()">
+                {{ createSaving ? '...' : '创建' }}
+              </button>
+              <button class="inline-edit-cancel" @click="showCreateNode = false">取消</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Create Edge Panel -->
+        <div v-if="showCreateEdge" class="detail-panel create-panel">
+          <div class="detail-panel-header">
+            <span class="detail-title">New Edge</span>
+            <button class="detail-close" @click="showCreateEdge = false">×</button>
+          </div>
+          <div class="detail-content">
+            <div class="detail-row">
+              <span class="detail-label">From:</span>
+              <select class="inline-edit-input" v-model="createEdgeForm.sourceUuid">
+                <option value="">选择源节点</option>
+                <option v-for="n in nodeList" :key="n.uuid" :value="n.uuid">{{ n.name }}</option>
+              </select>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">To:</span>
+              <select class="inline-edit-input" v-model="createEdgeForm.targetUuid">
+                <option value="">选择目标节点</option>
+                <option v-for="n in nodeList" :key="n.uuid" :value="n.uuid">{{ n.name }}</option>
+              </select>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Label:</span>
+              <input class="inline-edit-input" v-model="createEdgeForm.name" placeholder="关系类型 如 FRIEND_OF" />
+            </div>
+            <div class="detail-section">
+              <div class="section-title">Fact:</div>
+              <textarea class="inline-edit-textarea" v-model="createEdgeForm.fact" rows="2" placeholder="关系描述"></textarea>
+            </div>
+            <div class="inline-edit-actions" style="margin-top:8px">
+              <button class="inline-edit-save" @click="submitCreateEdge" :disabled="createSaving || !createEdgeForm.sourceUuid || !createEdgeForm.targetUuid">
+                {{ createSaving ? '...' : '创建' }}
+              </button>
+              <button class="inline-edit-cancel" @click="showCreateEdge = false">取消</button>
+            </div>
+          </div>
+        </div>
       </div>
-      
+
       <!-- 加载状态 -->
       <div v-else-if="loading" class="graph-state">
         <div class="loading-spinner"></div>
@@ -244,7 +352,8 @@ const props = defineProps({
   loading: Boolean,
   currentPhase: Number,
   isSimulating: Boolean,
-  highlightNodeId: String
+  highlightNodeId: String,
+  graphId: String
 })
 
 const emit = defineEmits(['refresh', 'toggle-maximize'])
@@ -254,6 +363,124 @@ const graphSvg = ref(null)
 const selectedItem = ref(null)
 const showEdgeLabels = ref(true) // 默认显示边标签
 const expandedSelfLoops = ref(new Set()) // 展开的自环项
+
+// --- Inline editing ---
+const editingField = ref(null)  // e.g. 'node-name', 'node-summary', 'edge-name', 'edge-fact'
+const editValue = ref('')
+const editSaving = ref(false)
+
+const startEdit = (field, currentValue) => {
+  editingField.value = field
+  editValue.value = currentValue || ''
+}
+
+const cancelEdit = () => {
+  editingField.value = null
+  editValue.value = ''
+}
+
+// --- Create Node/Edge ---
+const showCreateNode = ref(false)
+const showCreateEdge = ref(false)
+const createSaving = ref(false)
+const createNodeForm = ref({ name: '', entity_type: 'Person', summary: '' })
+const createEdgeForm = ref({ sourceUuid: '', targetUuid: '', name: 'RELATES_TO', fact: '' })
+
+const nodeList = computed(() => {
+  return (props.graphData?.nodes || []).map(n => ({ uuid: n.uuid, name: n.name }))
+})
+
+const openCreateNode = () => {
+  showCreateNode.value = true
+  showCreateEdge.value = false
+  selectedItem.value = null
+  createNodeForm.value = { name: '', entity_type: 'Person', summary: '' }
+}
+
+const openCreateEdge = () => {
+  showCreateEdge.value = true
+  showCreateNode.value = false
+  selectedItem.value = null
+  createEdgeForm.value = { sourceUuid: '', targetUuid: '', name: 'RELATES_TO', fact: '' }
+}
+
+const submitCreateNode = async () => {
+  if (!props.graphId || createSaving.value) return
+  createSaving.value = true
+  try {
+    const { createEntityNode } = await import('../api/graph.js')
+    const res = await createEntityNode(props.graphId, {
+      name: createNodeForm.value.name.trim(),
+      entity_type: createNodeForm.value.entity_type || 'Person',
+      summary: createNodeForm.value.summary
+    })
+    if (res.success) {
+      showCreateNode.value = false
+      emit('refresh')
+    }
+  } catch (err) {
+    console.error('Create node failed:', err)
+  } finally {
+    createSaving.value = false
+  }
+}
+
+const submitCreateEdge = async () => {
+  if (!props.graphId || createSaving.value) return
+  createSaving.value = true
+  try {
+    const form = createEdgeForm.value
+    // Use the existing updateEntityEdges won't work (replaces all edges).
+    // We need a direct Cypher call. Use a new API or the createEntityNode with relationships.
+    // Simplest: call updateEntityEdges with the source node, appending the new edge.
+    // But that would replace all edges. Instead, let's use a direct API.
+    // We'll add a backend endpoint for creating a single edge.
+    const service = (await import('../api/index')).default
+    await service({
+      url: `/api/graph/edge/${props.graphId}`,
+      method: 'post',
+      data: {
+        source_uuid: form.sourceUuid,
+        target_uuid: form.targetUuid,
+        name: form.name || 'RELATES_TO',
+        fact: form.fact
+      }
+    })
+    showCreateEdge.value = false
+    emit('refresh')
+  } catch (err) {
+    console.error('Create edge failed:', err)
+  } finally {
+    createSaving.value = false
+  }
+}
+
+const saveEdit = async () => {
+  if (!props.graphId || editSaving.value) return
+  editSaving.value = true
+  try {
+    const item = selectedItem.value
+    if (!item) return
+
+    if (editingField.value === 'node-name' || editingField.value === 'node-summary') {
+      const { updateEntityNode } = await import('../api/graph.js')
+      const field = editingField.value === 'node-name' ? 'name' : 'summary'
+      await updateEntityNode(props.graphId, item.data.uuid, { [field]: editValue.value })
+      item.data[field] = editValue.value
+    } else if (editingField.value === 'edge-name' || editingField.value === 'edge-fact') {
+      const { updateEdge } = await import('../api/graph.js')
+      const field = editingField.value === 'edge-name' ? 'name' : 'fact'
+      await updateEdge(props.graphId, item.data.uuid, { [field]: editValue.value })
+      item.data[field] = editValue.value
+    }
+    editingField.value = null
+    editValue.value = ''
+  } catch (err) {
+    console.error('Save edit failed:', err)
+  } finally {
+    editSaving.value = false
+  }
+}
 const showSimulationFinishedHint = ref(false) // 模拟结束后的提示
 const wasSimulating = ref(false) // 追踪之前是否在模拟中
 
@@ -917,6 +1144,20 @@ onUnmounted(() => {
   border-color: #CCC;
 }
 
+.tool-btn.add-btn {
+  font-size: 11px;
+  color: #7C3AED;
+  border-color: #D8CCF5;
+}
+.tool-btn.add-btn:hover {
+  background: #F5F0FF;
+  border-color: #7C3AED;
+}
+
+.create-panel {
+  border-top: 2px solid #7C3AED;
+}
+
 .tool-btn .btn-text {
   font-size: 12px;
 }
@@ -1162,6 +1403,84 @@ input:checked + .slider:before {
 .detail-value.fact-text {
   line-height: 1.5;
   color: #444;
+}
+
+/* Inline editing */
+.detail-value.editable {
+  cursor: pointer;
+  position: relative;
+}
+.detail-value.editable:hover {
+  background: #F5F5F5;
+  border-radius: 3px;
+}
+.summary-text.editable {
+  cursor: pointer;
+}
+.summary-text.editable:hover {
+  background: #F5F5F5;
+  border-radius: 3px;
+}
+.edit-hint {
+  font-size: 11px;
+  color: #CCC;
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.editable:hover .edit-hint {
+  opacity: 1;
+}
+.inline-edit-input {
+  flex: 1;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #BBB;
+  border-radius: 3px;
+  font-size: 12px;
+  outline: none;
+}
+.inline-edit-input:focus {
+  border-color: #7C3AED;
+}
+.inline-edit-textarea {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid #BBB;
+  border-radius: 3px;
+  font-size: 12px;
+  outline: none;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.inline-edit-textarea:focus {
+  border-color: #7C3AED;
+}
+.inline-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.inline-edit-save {
+  padding: 2px 10px;
+  font-size: 11px;
+  border: 1px solid #7C3AED;
+  border-radius: 3px;
+  background: #7C3AED;
+  color: #FFF;
+  cursor: pointer;
+}
+.inline-edit-save:disabled {
+  opacity: 0.5;
+}
+.inline-edit-cancel {
+  padding: 2px 10px;
+  font-size: 11px;
+  border: 1px solid #DDD;
+  border-radius: 3px;
+  background: #FFF;
+  color: #666;
+  cursor: pointer;
 }
 
 .detail-section {

@@ -137,6 +137,119 @@ def read_entities_from_falkordb(
     return entities
 
 
+def read_all_nodes_directory(
+    group_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    读取图谱中所有节点的精简目录（uuid, name, labels, summary），
+    用于记忆系统 known_nodes 判断。不做类型过滤。
+
+    Returns:
+        [{"uuid", "name", "labels", "summary"}]
+    """
+    from falkordb import FalkorDB
+
+    db = FalkorDB(
+        host=Config.FALKORDB_HOST,
+        port=Config.FALKORDB_PORT,
+        password=Config.FALKORDB_PASSWORD or None,
+    )
+    graph = db.select_graph(group_id)
+
+    nodes = []
+    try:
+        result = graph.query("MATCH (n:Entity) RETURN n")
+        for record in result.result_set:
+            node = record[0]
+            props = node.properties
+            name = (props.get("name") or "").strip()
+            if not name:
+                continue
+            nodes.append({
+                "uuid": props.get("uuid", ""),
+                "name": name,
+                "labels": list(node.labels) if hasattr(node, 'labels') else [],
+                "summary": props.get("summary", ""),
+            })
+    except Exception as e:
+        logger.warning(f"读取全部节点目录失败: {e}")
+
+    logger.debug(f"全部节点目录: group_id={group_id}, count={len(nodes)}")
+    return nodes
+
+
+def read_nodes_by_uuids(
+    group_id: str,
+    uuids: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    按 UUID 列表批量读取节点详情（含 summary）及其关联的边。
+    用于记忆检索后获取召回节点的完整信息。
+
+    Returns:
+        [{"uuid", "name", "labels", "summary", "related_facts": [str]}]
+    """
+    if not uuids:
+        return []
+
+    from falkordb import FalkorDB
+
+    db = FalkorDB(
+        host=Config.FALKORDB_HOST,
+        port=Config.FALKORDB_PORT,
+        password=Config.FALKORDB_PASSWORD or None,
+    )
+    graph = db.select_graph(group_id)
+
+    nodes = []
+    try:
+        # 批量查询节点
+        result = graph.query(
+            "MATCH (n:Entity) WHERE n.uuid IN $uuids RETURN n",
+            {"uuids": uuids}
+        )
+        node_map = {}
+        for record in result.result_set:
+            node = record[0]
+            props = node.properties
+            node_uuid = props.get("uuid", "")
+            node_map[node_uuid] = {
+                "uuid": node_uuid,
+                "name": (props.get("name") or "").strip(),
+                "labels": list(node.labels) if hasattr(node, 'labels') else [],
+                "summary": props.get("summary", ""),
+                "related_facts": [],
+            }
+
+        # 查询这些节点的关联边 facts
+        if node_map:
+            edges_result = graph.query(
+                "MATCH (s:Entity)-[r]->(t:Entity) "
+                "WHERE s.uuid IN $uuids OR t.uuid IN $uuids "
+                "RETURN s.uuid, r.fact, t.uuid, s.name, t.name",
+                {"uuids": uuids}
+            )
+            for record in edges_result.result_set:
+                s_uuid, fact, t_uuid, s_name, t_name = record
+                if not fact:
+                    continue
+                # 将 fact 添加到相关节点
+                if s_uuid in node_map:
+                    node_map[s_uuid]["related_facts"].append(fact)
+                if t_uuid in node_map and t_uuid != s_uuid:
+                    node_map[t_uuid]["related_facts"].append(fact)
+
+        # 去重 facts 并返回
+        for nd in node_map.values():
+            nd["related_facts"] = list(dict.fromkeys(nd["related_facts"]))
+            nodes.append(nd)
+
+    except Exception as e:
+        logger.warning(f"按UUID批量读取节点失败: {e}")
+
+    return nodes
+
+
 def read_entity_edges(
     group_id: str,
     entity_uuid: str,
