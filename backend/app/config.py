@@ -4,11 +4,17 @@
 """
 
 import os
+import shutil
 from dotenv import load_dotenv
 
 # 加载项目根目录的 .env 文件
 # 路径: AGARS/.env (相对于 backend/app/config.py)
 project_root_env = os.path.join(os.path.dirname(__file__), '../../.env')
+project_root_env_example = os.path.join(os.path.dirname(__file__), '../../.env.example')
+
+if not os.path.exists(project_root_env) and os.path.exists(project_root_env_example):
+    # 首次运行：从 .env.example 自动创建 .env
+    shutil.copy2(project_root_env_example, project_root_env)
 
 if os.path.exists(project_root_env):
     load_dotenv(project_root_env, override=True)

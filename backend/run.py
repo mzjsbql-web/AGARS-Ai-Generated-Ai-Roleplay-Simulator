@@ -24,14 +24,14 @@ from app.config import Config
 
 def main():
     """主函数"""
-    # 验证配置
+    # 验证配置（缺少 API key 时仅警告，允许通过设置页面配置）
     errors = Config.validate()
     if errors:
-        print("配置错误:")
+        print("⚠ 配置警告:")
         for err in errors:
             print(f"  - {err}")
-        print("\n请检查 .env 文件中的配置")
-        sys.exit(1)
+        print("\n请在启动后通过设置页面（全局配置）填写，或手动编辑 .env 文件")
+        print("服务仍将启动，但部分功能需要配置后才能使用\n")
     
     # 创建应用
     app = create_app()
