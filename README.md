@@ -44,32 +44,60 @@
 ### Monitor 历史记录
 ![Monitor历史记录](./static/image/monitor%20history%20page.png)
 
-## 环境配置
+## 快速开始
 
-### 前置要求
+### 一键安装（推荐）
+
+双击项目根目录的 **`install.bat`**，脚本会自动检测并安装所有依赖（Node.js、Python、uv、Docker Desktop、FalkorDB），已安装的会自动跳过。
+
+安装完成后：
+
+```bash
+npm run dev
+```
+
+打开浏览器访问 `http://localhost:5173`，在右上角**设置 → 全局配置**中填写 API Key 即可开始使用。
+
+### 手动安装
+
+如果一键安装脚本不适用（如 Linux / macOS），可按以下步骤操作：
+
+#### 前置要求
 
 | 工具 | 版本要求 | 说明 |
 |------|---------|------|
-| **Node.js** | >= 18 | 前端运行环境 |
-| **Python** | >= 3.11 | 后端运行环境 |
-| **uv** | 最新版 | Python 包管理器 |
-| **Docker** | 最新版 | 用于运行 FalkorDB |
+| **Node.js** | >= 18 | 前端运行环境（[下载](https://nodejs.org/)） |
+| **Python** | >= 3.11 | 后端运行环境（[下载](https://www.python.org/)） |
+| **uv** | 最新版 | Python 包管理器（[安装](https://docs.astral.sh/uv/)） |
+| **Docker** | 最新版 | 用于运行 FalkorDB（[下载](https://www.docker.com/products/docker-desktop/)） |
 
 LLM API 需兼容 OpenAI SDK 格式，并支持 `response_format` 的 `json_schema` 模式（结构化输出）。
 
-### 1. 启动 FalkorDB
+#### 1. 启动 FalkorDB
 
 ```bash
 docker run -d --name falkordb -p 6379:6379 falkordb/falkordb
 ```
 
-### 2. 配置环境变量
+#### 2. 安装依赖
 
 ```bash
-cp .env.example .env
+# 一键安装所有依赖（Node + Python）
+npm run setup:all
 ```
 
-编辑 `.env` 文件，填入以下配置：
+#### 3. 启动服务
+
+```bash
+npm run dev
+```
+
+- 前端：`http://localhost:5173`
+- 后端 API：`http://localhost:5001`
+
+#### 4. 配置 API Key
+
+首次启动时 `.env` 会从 `.env.example` 自动生成。打开设置页面的**全局配置**标签页填写 API Key，或手动编辑 `.env` 文件：
 
 | 变量 | 必需 | 说明 |
 |------|------|------|
@@ -84,29 +112,11 @@ cp .env.example .env
 | `FALKORDB_PORT` | 否 | FalkorDB 端口（默认 `6379`） |
 | `FALKORDB_PASSWORD` | 否 | FalkorDB 密码（默认为空） |
 
-### 3. 安装依赖
-
-```bash
-# 一键安装所有依赖（Node + Python）
-npm run setup:all
-```
-
-### 4. 启动服务
-
-```bash
-npm run dev
-```
-
-- 前端：`http://localhost:3000`
-- 后端 API：`http://localhost:5001`
-
 ### Docker 部署
 
 也可以使用 Docker Compose 一键部署：
 
 ```bash
-cp .env.example .env
-# 编辑 .env 填入配置
 docker compose up -d
 ```
 

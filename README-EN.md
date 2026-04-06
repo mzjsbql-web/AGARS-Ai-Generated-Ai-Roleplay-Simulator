@@ -37,32 +37,60 @@ Conventional AI roleplay frontends cram narrative, character roleplay, and world
 ### Monitor History
 ![Monitor History](./static/image/monitor%20history%20page.png)
 
-## Setup
+## Quick Start
 
-### Prerequisites
+### One-Click Install (Windows, Recommended)
+
+Double-click **`install.bat`** in the project root. The script automatically detects and installs all dependencies (Node.js, Python, uv, Docker Desktop, FalkorDB), skipping anything already installed.
+
+After installation:
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser, go to **Settings → Global Config** (top-right) and enter your API keys.
+
+### Manual Setup
+
+For Linux / macOS or if the installer script doesn't apply:
+
+#### Prerequisites
 
 | Tool | Version | Description |
 |------|---------|-------------|
-| **Node.js** | >= 18 | Frontend runtime |
-| **Python** | >= 3.11 | Backend runtime |
-| **uv** | Latest | Python package manager |
-| **Docker** | Latest | Required for running FalkorDB |
+| **Node.js** | >= 18 | Frontend runtime ([download](https://nodejs.org/)) |
+| **Python** | >= 3.11 | Backend runtime ([download](https://www.python.org/)) |
+| **uv** | Latest | Python package manager ([install](https://docs.astral.sh/uv/)) |
+| **Docker** | Latest | Required for FalkorDB ([download](https://www.docker.com/products/docker-desktop/)) |
 
 The LLM API must be compatible with the OpenAI SDK format and support `response_format` with `json_schema` mode (structured output).
 
-### 1. Start FalkorDB
+#### 1. Start FalkorDB
 
 ```bash
 docker run -d --name falkordb -p 6379:6379 falkordb/falkordb
 ```
 
-### 2. Configure Environment Variables
+#### 2. Install Dependencies
 
 ```bash
-cp .env.example .env
+# Install all dependencies at once (Node + Python)
+npm run setup:all
 ```
 
-Edit the `.env` file with the following:
+#### 3. Start Services
+
+```bash
+npm run dev
+```
+
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:5001`
+
+#### 4. Configure API Keys
+
+On first startup, `.env` is automatically created from `.env.example`. Open the **Global Config** tab in Settings to enter your API keys, or edit `.env` manually:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -77,29 +105,11 @@ Edit the `.env` file with the following:
 | `FALKORDB_PORT` | No | FalkorDB port (default: `6379`) |
 | `FALKORDB_PASSWORD` | No | FalkorDB password (default: empty) |
 
-### 3. Install Dependencies
-
-```bash
-# Install all dependencies at once (Node + Python)
-npm run setup:all
-```
-
-### 4. Start Services
-
-```bash
-npm run dev
-```
-
-- Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:5001`
-
 ### Docker Deployment
 
 Alternatively, deploy with Docker Compose:
 
 ```bash
-cp .env.example .env
-# Edit .env with your configuration
 docker compose up -d
 ```
 
