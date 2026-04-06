@@ -45,12 +45,15 @@ def create_app(config_class=Config):
     CORS(app, resources={r"/api/*": {"origins": "*"}})
     
     # 注册模拟进程清理函数（确保服务器关闭时终止所有模拟进程）
-    from .services.simulation_runner import SimulationRunner
-    SimulationRunner.register_cleanup()
-    from .services.narrative_engine import NarrativeEngine
-    NarrativeEngine.register_cleanup()
-    if should_log_startup:
-        logger.info("已注册模拟进程清理函数")
+    try:
+        from .services.simulation_runner import SimulationRunner
+        SimulationRunner.register_cleanup()
+        from .services.narrative_engine import NarrativeEngine
+        NarrativeEngine.register_cleanup()
+        if should_log_startup:
+            logger.info("已注册模拟进程清理函数")
+    except Exception as e:
+        logger.warning(f"注册清理函数失败（部分依赖未安装）: {e}")
     
     # 请求日志中间件
     @app.before_request
