@@ -11,7 +11,7 @@
     或在终端中执行：powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $Host.UI.RawUI.WindowTitle = 'AGARS Installer'
 
 # ============================================================
@@ -76,10 +76,14 @@ $needsRestart = $false
 # --------------------------------------------------
 Write-Step "1/7" "Checking PowerShell execution policy..."
 
-$policy = Get-ExecutionPolicy -Scope CurrentUser
-if ($policy -eq 'Restricted' -or $policy -eq 'Undefined') {
-    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
-    Write-OK "Execution policy set to RemoteSigned"
+$policy = Get-ExecutionPolicy
+if ($policy -eq 'Restricted') {
+    try {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop
+        Write-OK "Execution policy set to RemoteSigned"
+    } catch {
+        Write-Warn "Could not change execution policy (current: $policy). If the script is running, this is fine."
+    }
 } else {
     Write-Skip "Already set to $policy"
 }
@@ -95,7 +99,7 @@ if (Test-Command 'node') {
 } else {
     Write-Host "  Installing Node.js LTS..." -ForegroundColor Yellow
     if (Test-Winget) {
-        winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+        winget install OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
     } else {
         Write-Fail "winget not found. Please install Node.js manually: https://nodejs.org/"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
@@ -121,7 +125,7 @@ if (Test-Command 'python') {
 } else {
     Write-Host "  Installing Python 3.12..." -ForegroundColor Yellow
     if (Test-Winget) {
-        winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements
+        winget install Python.Python.3.12 --source winget --accept-source-agreements --accept-package-agreements
     } else {
         Write-Fail "winget not found. Please install Python manually: https://www.python.org/"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
@@ -172,7 +176,7 @@ if (Test-Command 'docker') {
 } else {
     Write-Host "  Installing Docker Desktop..." -ForegroundColor Yellow
     if (Test-Winget) {
-        winget install Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
+        winget install Docker.DockerDesktop --source winget --accept-source-agreements --accept-package-agreements
         $needsRestart = $true
         Write-Warn "Docker Desktop installed. You may need to restart your computer and launch Docker Desktop before proceeding."
     } else {
