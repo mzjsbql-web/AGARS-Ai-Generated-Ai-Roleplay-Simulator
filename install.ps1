@@ -40,11 +40,53 @@ function Write-Fail($msg) {
 }
 
 function Test-Command($name) {
-    return [bool](Get-Command $name -ErrorAction SilentlyContinue)
+    try {
+        $null = & $name --version 2>$null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
 }
 
 function Test-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
+}
+
+function Install-Winget {
+    # Windows Server / LTSC 没有预装 winget，需要手动安装
+    Write-Host "  winget not found, installing..." -ForegroundColor Yellow
+    try {
+        # 下载最新 winget release
+        $apiUrl = 'https://api.github.com/repos/microsoft/winget-cli/releases/latest'
+        $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
+        $msixUrl = ($release.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1).browser_download_url
+        $licUrl  = ($release.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1).browser_download_url
+
+        $tmpDir = Join-Path $env:TEMP 'winget-install'
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $msixPath = Join-Path $tmpDir 'winget.msixbundle'
+        $licPath  = Join-Path $tmpDir 'license.xml'
+
+        Invoke-WebRequest -Uri $msixUrl -OutFile $msixPath -UseBasicParsing
+        Invoke-WebRequest -Uri $licUrl -OutFile $licPath -UseBasicParsing
+
+        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licPath -ErrorAction Stop | Out-Null
+        Refresh-Path
+        Write-OK "winget installed"
+        return $true
+    } catch {
+        # 备选：非管理员或 AppxProvisionedPackage 不可用时尝试 Add-AppxPackage
+        try {
+            Add-AppxPackage -Path $msixPath -ErrorAction Stop
+            Refresh-Path
+            Write-OK "winget installed (user scope)"
+            return $true
+        } catch {
+            Write-Warn "Could not install winget automatically: $_"
+            Write-Host "  Manual install: https://github.com/microsoft/winget-cli/releases" -ForegroundColor Yellow
+            return $false
+        }
+    }
 }
 
 function Refresh-Path {
@@ -86,6 +128,13 @@ if ($policy -eq 'Restricted') {
     }
 } else {
     Write-Skip "Already set to $policy"
+}
+
+# --------------------------------------------------
+# Step 1.5: Ensure winget is available
+# --------------------------------------------------
+if (-not (Test-Winget)) {
+    Install-Winget
 }
 
 # --------------------------------------------------
@@ -174,11 +223,21 @@ if (Test-Command 'docker') {
     $dockerVer = (docker --version 2>$null)
     Write-Skip "$dockerVer already installed"
 } else {
-    Write-Host "  Installing Docker Desktop..." -ForegroundColor Yellow
+    Write-Host "  Installing Docker Desktop (may require admin privileges)..." -ForegroundColor Yellow
     if (Test-Winget) {
         winget install Docker.DockerDesktop --source winget --accept-source-agreements --accept-package-agreements
-        $needsRestart = $true
-        Write-Warn "Docker Desktop installed. You may need to restart your computer and launch Docker Desktop before proceeding."
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Docker Desktop installation failed (exit code $LASTEXITCODE)"
+            Write-Host "  Common causes:" -ForegroundColor Yellow
+            Write-Host "    - Installation was cancelled or requires admin privileges"
+            Write-Host "    - WSL2 or Hyper-V not enabled"
+            Write-Host "  Please install manually: https://www.docker.com/products/docker-desktop/"
+            Write-Host "  Press Enter to continue, or Ctrl+C to exit."
+            Read-Host
+        } else {
+            $needsRestart = $true
+            Write-OK "Docker Desktop installed. Please restart your computer and launch Docker Desktop."
+        }
     } else {
         Write-Fail "winget not found. Please install Docker Desktop manually: https://www.docker.com/products/docker-desktop/"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
