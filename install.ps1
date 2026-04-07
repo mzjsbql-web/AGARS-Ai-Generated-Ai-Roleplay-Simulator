@@ -52,6 +52,24 @@ function Test-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
 }
 
+function Find-Winget {
+    # winget 可能在多个位置，逐个查找
+    $candidates = @(
+        (Get-Command winget -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+        "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe",
+        "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe",
+        "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe"
+    )
+    foreach ($pattern in $candidates) {
+        if (-not $pattern) { continue }
+        $resolved = Resolve-Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($resolved -and (Test-Path $resolved)) {
+            return $resolved.Path
+        }
+    }
+    return $null
+}
+
 function Install-Winget {
     # Windows Server / LTSC 没有预装 winget，需要手动安装
     Write-Host "  winget not found, installing..." -ForegroundColor Yellow
@@ -70,22 +88,33 @@ function Install-Winget {
         Invoke-WebRequest -Uri $msixUrl -OutFile $msixPath -UseBasicParsing
         Invoke-WebRequest -Uri $licUrl -OutFile $licPath -UseBasicParsing
 
-        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licPath -ErrorAction Stop | Out-Null
-        Refresh-Path
-        Write-OK "winget installed"
-        return $true
-    } catch {
-        # 备选：非管理员或 AppxProvisionedPackage 不可用时尝试 Add-AppxPackage
+        # 尝试系统级安装（需要管理员）
         try {
-            Add-AppxPackage -Path $msixPath -ErrorAction Stop
-            Refresh-Path
-            Write-OK "winget installed (user scope)"
-            return $true
+            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licPath -ErrorAction Stop | Out-Null
         } catch {
-            Write-Warn "Could not install winget automatically: $_"
-            Write-Host "  Manual install: https://github.com/microsoft/winget-cli/releases" -ForegroundColor Yellow
+            # 备选：用户级安装
+            Add-AppxPackage -Path $msixPath -ErrorAction Stop
+        }
+
+        Refresh-Path
+
+        # Appx 安装后 winget 可能不在 PATH 中，手动查找并加入
+        $wingetPath = Find-Winget
+        if ($wingetPath) {
+            $wingetDir = Split-Path $wingetPath
+            if ($env:Path -notlike "*$wingetDir*") {
+                $env:Path = "$wingetDir;$env:Path"
+            }
+            Write-OK "winget installed ($wingetPath)"
+            return $true
+        } else {
+            Write-Warn "winget installed but could not locate executable. Please restart terminal and re-run."
             return $false
         }
+    } catch {
+        Write-Warn "Could not install winget automatically: $_"
+        Write-Host "  Manual install: https://github.com/microsoft/winget-cli/releases" -ForegroundColor Yellow
+        return $false
     }
 }
 
