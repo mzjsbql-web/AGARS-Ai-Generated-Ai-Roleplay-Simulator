@@ -3,10 +3,11 @@
 .SYNOPSIS
     AGARS 一键安装脚本 (Windows)
 .DESCRIPTION
-    自动检测并安装所有依赖：Node.js、Python、uv、Docker Desktop、FalkorDB
+    自动检测并安装所有依赖：Node.js、Python、uv、Docker、FalkorDB
     然后安装项目依赖并启动数据库容器。
+    桌面版 Windows 安装 Docker Desktop，Windows Server 安装 Docker Engine。
 .NOTES
-    以普通用户权限运行即可，部分安装步骤可能弹出 UAC 提示。
+    建议以管理员权限运行，部分安装步骤可能弹出 UAC 提示。
     用法：右键本文件 → "使用 PowerShell 运行"
     或在终端中执行：powershell -ExecutionPolicy Bypass -File install.ps1
 #>
@@ -99,6 +100,79 @@ function Invoke-WingetInstall($packageId) {
         return ($LASTEXITCODE -eq 0)
     } catch {
         Write-Warn "winget install failed: $_"
+        return $false
+    }
+}
+
+function Test-IsWindowsServer {
+    # 判断当前系统是否为 Windows Server
+    $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($osInfo) {
+        return ($osInfo.ProductType -ne 1)  # 1 = Workstation, 2 = Domain Controller, 3 = Server
+    }
+    # 备选：检查 Server 特有注册表
+    $installType = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue).InstallationType
+    return ($installType -eq 'Server' -or $installType -eq 'Server Core')
+}
+
+function Install-DockerEngine {
+    # Windows Server 上安装 Docker Engine（Moby），不需要 Docker Desktop
+    Write-Host "  Detected Windows Server - installing Docker Engine (not Desktop)..." -ForegroundColor Yellow
+    try {
+        # Step 1: 启用 Containers 功能
+        Write-Host "  Enabling Containers feature..." -ForegroundColor Gray
+        $feature = Get-WindowsFeature -Name Containers -ErrorAction Stop
+        if (-not $feature.Installed) {
+            Install-WindowsFeature -Name Containers -ErrorAction Stop | Out-Null
+            Write-Host "  [OK] Containers feature enabled" -ForegroundColor Green
+            $script:NeedsReboot = $true
+        } else {
+            Write-Host "  [SKIP] Containers feature already enabled" -ForegroundColor DarkGray
+        }
+
+        # Step 2: 安装 Docker CE (Moby) 通过 OneGet/DockerMsftProvider
+        Write-Host "  Installing Docker provider and package..." -ForegroundColor Gray
+
+        # 确保 NuGet provider 可用
+        $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction SilentlyContinue
+
+        # 安装 DockerMsftProvider（如果没有）
+        if (-not (Get-Module -ListAvailable DockerMsftProvider -ErrorAction SilentlyContinue)) {
+            Install-Module -Name DockerMsftProvider -Repository PSGallery -Force -ErrorAction Stop
+        }
+
+        # 安装 Docker 包
+        $dockerPkg = Get-Package -Name docker -ProviderName DockerMsftProvider -ErrorAction SilentlyContinue
+        if ($dockerPkg) {
+            Write-Host "  [SKIP] Docker Engine already installed ($($dockerPkg.Version))" -ForegroundColor DarkGray
+        } else {
+            Install-Package -Name docker -ProviderName DockerMsftProvider -Force -ErrorAction Stop | Out-Null
+            Write-Host "  [OK] Docker Engine installed" -ForegroundColor Green
+            $script:NeedsReboot = $true
+        }
+
+        # Step 3: 启动 Docker 服务
+        $svc = Get-Service docker -ErrorAction SilentlyContinue
+        if ($svc) {
+            if ($svc.Status -ne 'Running') {
+                Start-Service docker -ErrorAction SilentlyContinue
+            }
+            Write-OK "Docker Engine service running"
+        } else {
+            if ($script:NeedsReboot) {
+                Write-Warn "Docker Engine installed. A system reboot is required before the Docker service can start."
+            } else {
+                Write-Warn "Docker service not found. Try restarting the server."
+            }
+        }
+
+        return $true
+    } catch {
+        Write-Fail "Docker Engine install failed: $_"
+        Write-Host "  You can install manually:" -ForegroundColor Yellow
+        Write-Host "    Install-WindowsFeature -Name Containers" -ForegroundColor Yellow
+        Write-Host "    Install-Module DockerMsftProvider -Force" -ForegroundColor Yellow
+        Write-Host "    Install-Package docker -ProviderName DockerMsftProvider -Force" -ForegroundColor Yellow
         return $false
     }
 }
@@ -242,6 +316,7 @@ Write-Host "Project: $projectRoot"
 Write-Host ""
 
 $needsRestart = $false
+$script:NeedsReboot = $false  # Docker Engine on Server 可能需要系统重启
 
 # --------------------------------------------------
 # Step 1: PowerShell 执行策略
@@ -351,14 +426,77 @@ if (Test-Command 'uv') {
 }
 
 # --------------------------------------------------
-# Step 5: Docker Desktop
+# Step 5: Docker（Server 装 Docker Engine，桌面版装 Docker Desktop）
 # --------------------------------------------------
 Write-Step "5/7" "Checking Docker..."
+
+$isServer = Test-IsWindowsServer
+if ($isServer) {
+    Write-Host "  [INFO] Detected Windows Server" -ForegroundColor DarkGray
+}
 
 if (Test-Command 'docker') {
     $dockerVer = (docker --version 2>$null)
     Write-Skip "$dockerVer already installed"
+} elseif ($isServer) {
+    # Windows Server：安装 Docker Engine（原生容器支持，轻量无 GUI）
+    $installed = Install-DockerEngine
+    if (-not $installed) {
+        Write-Host "  Press Enter to continue, or Ctrl+C to exit."
+        Read-Host
+    }
+    Refresh-Path
 } else {
+    # 桌面版 Windows（Home/Pro/Edu/Ent）：确保 WSL2 依赖就绪，然后安装 Docker Desktop
+
+    # 5a: 启用 Docker Desktop 所需的 Windows 功能（WSL2 后端）
+    Write-Host "  Checking WSL2 prerequisites..." -ForegroundColor Gray
+    $featuresEnabled = 0
+
+    # Virtual Machine Platform（WSL2 必需，Home 版也有此功能）
+    try {
+        $vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Stop
+        if ($vmp.State -ne 'Enabled') {
+            Write-Host "  Enabling Virtual Machine Platform..." -ForegroundColor Yellow
+            Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -ErrorAction Stop | Out-Null
+            $featuresEnabled++
+            Write-Host "  [OK] Virtual Machine Platform enabled" -ForegroundColor Green
+        } else {
+            Write-Host "  [SKIP] Virtual Machine Platform already enabled" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warn "Could not enable Virtual Machine Platform: $_"
+    }
+
+    # Windows Subsystem for Linux
+    try {
+        $wsl = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -ErrorAction Stop
+        if ($wsl.State -ne 'Enabled') {
+            Write-Host "  Enabling Windows Subsystem for Linux..." -ForegroundColor Yellow
+            Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -ErrorAction Stop | Out-Null
+            $featuresEnabled++
+            Write-Host "  [OK] Windows Subsystem for Linux enabled" -ForegroundColor Green
+        } else {
+            Write-Host "  [SKIP] Windows Subsystem for Linux already enabled" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warn "Could not enable WSL: $_"
+    }
+
+    # 如果刚启用了功能，需要重启后才能用 WSL2 / Docker Desktop
+    if ($featuresEnabled -gt 0) {
+        $script:NeedsReboot = $true
+        Write-Warn "Windows features were enabled. A system reboot is required before Docker Desktop can work."
+    } else {
+        # 功能已就绪，尝试更新 WSL 内核
+        try {
+            Write-Host "  Updating WSL..." -ForegroundColor Gray
+            wsl --update 2>$null | Out-Null
+            wsl --set-default-version 2 2>$null | Out-Null
+        } catch { }
+    }
+
+    # 5b: 安装 Docker Desktop
     Write-Host "  Installing Docker Desktop (may require admin privileges)..." -ForegroundColor Yellow
     $installed = Invoke-WingetInstall 'Docker.DockerDesktop'
     if ($installed) {
@@ -368,11 +506,26 @@ if (Test-Command 'docker') {
         Write-Fail "Auto-install failed. Please install Docker Desktop manually: https://www.docker.com/products/docker-desktop/"
         Write-Host "  Common causes:" -ForegroundColor Yellow
         Write-Host "    - Installation was cancelled or requires admin privileges"
-        Write-Host "    - WSL2 or Hyper-V not enabled"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
         Read-Host
     }
     Refresh-Path
+}
+
+# --------------------------------------------------
+# 如果需要重启系统（启用 Windows 功能 / Server Docker Engine 后）
+# --------------------------------------------------
+if ($script:NeedsReboot) {
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Red
+    Write-Host "  A SYSTEM REBOOT is required to finish"     -ForegroundColor Red
+    Write-Host "  enabling Windows features for Docker."     -ForegroundColor Red
+    Write-Host "  Please reboot, then re-run this script."   -ForegroundColor Red
+    Write-Host "============================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Press Enter to exit..."
+    Read-Host
+    exit 0
 }
 
 # --------------------------------------------------
@@ -444,11 +597,11 @@ if (Test-Command 'docker') {
         }
     } catch {
         Write-Fail "Failed to start FalkorDB: $_"
-        Write-Host "  Make sure Docker Desktop is running, then run:" -ForegroundColor Yellow
+        Write-Host "  Make sure Docker is running, then run:" -ForegroundColor Yellow
         Write-Host "  docker run -d --name falkordb -p 6379:6379 falkordb/falkordb" -ForegroundColor Yellow
     }
 } else {
-    Write-Warn "Docker not available. After installing Docker Desktop and restarting, run:"
+    Write-Warn "Docker not available. After installing Docker and restarting, run:"
     Write-Host "  docker run -d --name falkordb -p 6379:6379 falkordb/falkordb" -ForegroundColor Yellow
 }
 
@@ -462,7 +615,7 @@ Write-Host "   Installation Complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. Make sure Docker Desktop is running"
+Write-Host "  1. Make sure Docker is running"
 Write-Host "  2. Run the project:  " -NoNewline
 Write-Host "npm run dev" -ForegroundColor Yellow
 Write-Host "  3. Open browser:     " -NoNewline
