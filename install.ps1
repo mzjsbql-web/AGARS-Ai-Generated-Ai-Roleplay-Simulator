@@ -49,7 +49,73 @@ function Test-Command($name) {
 }
 
 function Test-Winget {
-    return [bool](Get-Command winget -ErrorAction SilentlyContinue)
+    # 不仅检查 winget 是否存在，还要验证它能否实际运行（Windows Server 上 AppExecution Alias 可能 Access Denied）
+    try {
+        $null = winget --version 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-WingetInstall($packageId) {
+    # 尝试用 winget 安装，返回是否成功
+    if (-not (Test-Winget)) { return $false }
+    try {
+        winget install $packageId --source winget --accept-source-agreements --accept-package-agreements
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        Write-Warn "winget install failed: $_"
+        return $false
+    }
+}
+
+function Install-NodeDirect {
+    # 直接下载 Node.js LTS MSI 安装（winget 不可用时的备选方案）
+    Write-Host "  Downloading Node.js LTS installer directly..." -ForegroundColor Yellow
+    try {
+        $tmpDir = Join-Path $env:TEMP 'node-install'
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $msiPath = Join-Path $tmpDir 'node-lts.msi'
+
+        # 获取最新 LTS 版本号
+        $indexUrl = 'https://nodejs.org/dist/index.json'
+        $versions = Invoke-RestMethod -Uri $indexUrl -UseBasicParsing
+        $ltsVer = ($versions | Where-Object { $_.lts -ne $false } | Select-Object -First 1).version
+        $msiUrl = "https://nodejs.org/dist/$ltsVer/node-$ltsVer-x64.msi"
+
+        Write-Host "  Downloading Node.js $ltsVer ..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+
+        Write-Host "  Running installer (may prompt UAC)..." -ForegroundColor Gray
+        Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -Verb RunAs
+        return $true
+    } catch {
+        Write-Fail "Direct Node.js install failed: $_"
+        return $false
+    }
+}
+
+function Install-PythonDirect {
+    # 直接下载 Python 安装（winget 不可用时的备选方案）
+    Write-Host "  Downloading Python installer directly..." -ForegroundColor Yellow
+    try {
+        $tmpDir = Join-Path $env:TEMP 'python-install'
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $exePath = Join-Path $tmpDir 'python-installer.exe'
+
+        $pyUrl = 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe'
+
+        Write-Host "  Downloading Python 3.12.8 ..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $pyUrl -OutFile $exePath -UseBasicParsing
+
+        Write-Host "  Running installer (may prompt UAC)..." -ForegroundColor Gray
+        Start-Process $exePath -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait -Verb RunAs
+        return $true
+    } catch {
+        Write-Fail "Direct Python install failed: $_"
+        return $false
+    }
 }
 
 function Find-Winget {
@@ -176,10 +242,13 @@ if (Test-Command 'node') {
     Write-Skip "Node.js $nodeVer already installed"
 } else {
     Write-Host "  Installing Node.js LTS..." -ForegroundColor Yellow
-    if (Test-Winget) {
-        winget install OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
-    } else {
-        Write-Fail "winget not found. Please install Node.js manually: https://nodejs.org/"
+    $installed = Invoke-WingetInstall 'OpenJS.NodeJS.LTS'
+    if (-not $installed) {
+        # winget 失败（常见于 Windows Server），尝试直接下载 MSI
+        $installed = Install-NodeDirect
+    }
+    if (-not $installed) {
+        Write-Fail "Auto-install failed. Please install Node.js manually: https://nodejs.org/"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
         Read-Host
     }
@@ -202,10 +271,13 @@ if (Test-Command 'python') {
     Write-Skip "$pyVer already installed"
 } else {
     Write-Host "  Installing Python 3.12..." -ForegroundColor Yellow
-    if (Test-Winget) {
-        winget install Python.Python.3.12 --source winget --accept-source-agreements --accept-package-agreements
-    } else {
-        Write-Fail "winget not found. Please install Python manually: https://www.python.org/"
+    $installed = Invoke-WingetInstall 'Python.Python.3.12'
+    if (-not $installed) {
+        # winget 失败（常见于 Windows Server），尝试直接下载安装
+        $installed = Install-PythonDirect
+    }
+    if (-not $installed) {
+        Write-Fail "Auto-install failed. Please install Python manually: https://www.python.org/"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
         Read-Host
     }
@@ -253,22 +325,15 @@ if (Test-Command 'docker') {
     Write-Skip "$dockerVer already installed"
 } else {
     Write-Host "  Installing Docker Desktop (may require admin privileges)..." -ForegroundColor Yellow
-    if (Test-Winget) {
-        winget install Docker.DockerDesktop --source winget --accept-source-agreements --accept-package-agreements
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "Docker Desktop installation failed (exit code $LASTEXITCODE)"
-            Write-Host "  Common causes:" -ForegroundColor Yellow
-            Write-Host "    - Installation was cancelled or requires admin privileges"
-            Write-Host "    - WSL2 or Hyper-V not enabled"
-            Write-Host "  Please install manually: https://www.docker.com/products/docker-desktop/"
-            Write-Host "  Press Enter to continue, or Ctrl+C to exit."
-            Read-Host
-        } else {
-            $needsRestart = $true
-            Write-OK "Docker Desktop installed. Please restart your computer and launch Docker Desktop."
-        }
+    $installed = Invoke-WingetInstall 'Docker.DockerDesktop'
+    if ($installed) {
+        $needsRestart = $true
+        Write-OK "Docker Desktop installed. Please restart your computer and launch Docker Desktop."
     } else {
-        Write-Fail "winget not found. Please install Docker Desktop manually: https://www.docker.com/products/docker-desktop/"
+        Write-Fail "Auto-install failed. Please install Docker Desktop manually: https://www.docker.com/products/docker-desktop/"
+        Write-Host "  Common causes:" -ForegroundColor Yellow
+        Write-Host "    - Installation was cancelled or requires admin privileges"
+        Write-Host "    - WSL2 or Hyper-V not enabled"
         Write-Host "  Press Enter to continue after manual install, or Ctrl+C to exit."
         Read-Host
     }
