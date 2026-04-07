@@ -226,15 +226,37 @@ function Install-PythonDirect {
 }
 
 function Find-Winget {
-    # winget 可能在多个位置，逐个查找
+    # 查找 winget.exe 的真实路径
+    # WindowsApps 目录有 ACL 限制，通配符 Resolve-Path 经常失败
+    # 优先用 Get-AppxPackage 查询已安装包的位置（最可靠）
+
+    # 方式1：通过 Appx 包信息获取安装路径（不受 ACL 限制）
+    try {
+        $pkg = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($pkg -and $pkg.InstallLocation) {
+            $candidate = Join-Path $pkg.InstallLocation 'winget.exe'
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    } catch { }
+
+    # 方式2：Get-Command（可能返回 Alias 路径，但至少能找到）
+    try {
+        $cmd = Get-Command winget -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) {
+            return $cmd.Source
+        }
+    } catch { }
+
+    # 方式3：已知固定路径
     $candidates = @(
-        (Get-Command winget -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
         "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe",
         "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe",
         "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe"
     )
     foreach ($pattern in $candidates) {
-        if (-not $pattern) { continue }
         $resolved = Resolve-Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($resolved -and (Test-Path $resolved)) {
             return $resolved.Path
@@ -276,7 +298,27 @@ function Install-Winget {
         if ($wingetPath) {
             $wingetDir = Split-Path $wingetPath
             if ($env:Path -notlike "*$wingetDir*") {
+                # 当前会话立即生效
                 $env:Path = "$wingetDir;$env:Path"
+                # 持久化到系统 Machine PATH，下次开终端也能找到
+                try {
+                    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+                    if ($machinePath -notlike "*$wingetDir*") {
+                        [Environment]::SetEnvironmentVariable('Path', "$machinePath;$wingetDir", 'Machine')
+                        Write-Host "  [INFO] Added winget to system PATH (persistent)" -ForegroundColor DarkGray
+                    }
+                } catch {
+                    # 无管理员权限时回退到 User PATH
+                    try {
+                        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+                        if ($userPath -notlike "*$wingetDir*") {
+                            [Environment]::SetEnvironmentVariable('Path', "$userPath;$wingetDir", 'User')
+                            Write-Host "  [INFO] Added winget to user PATH (persistent)" -ForegroundColor DarkGray
+                        }
+                    } catch {
+                        Write-Warn "Could not persist winget PATH. It will work this session but may need re-install next time."
+                    }
+                }
             }
             # 缓存完整路径，后续调用直接用，绕开 Alias
             $script:WingetExe = $wingetPath
