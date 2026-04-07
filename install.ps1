@@ -48,21 +48,54 @@ function Test-Command($name) {
     }
 }
 
-function Test-Winget {
-    # 不仅检查 winget 是否存在，还要验证它能否实际运行（Windows Server 上 AppExecution Alias 可能 Access Denied）
+# 脚本级变量：保存 winget.exe 的完整路径，绕开 Windows Server 上 AppExecution Alias 的 Access Denied 问题
+$script:WingetExe = $null
+
+function Resolve-Winget {
+    # 找到可用的 winget.exe 并缓存到 $script:WingetExe
+    # 优先测试已缓存的路径
+    if ($script:WingetExe) {
+        if ($script:WingetExe -eq 'winget' -or (Test-Path $script:WingetExe)) {
+            return $true
+        }
+        # 缓存的路径已失效，清除
+        $script:WingetExe = $null
+    }
+
+    # 方式1：直接调用 winget（桌面版 Windows 通常可用）
     try {
         $null = winget --version 2>$null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
+        if ($LASTEXITCODE -eq 0) {
+            $script:WingetExe = 'winget'
+            return $true
+        }
+    } catch { }
+
+    # 方式2：通过完整路径绕开 AppExecution Alias（Windows Server 关键路径）
+    $realPath = Find-Winget
+    if ($realPath) {
+        try {
+            $null = & $realPath --version 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $script:WingetExe = $realPath
+                Write-Host "  [INFO] Using winget via full path: $realPath" -ForegroundColor DarkGray
+                return $true
+            }
+        } catch { }
     }
+
+    return $false
+}
+
+function Test-Winget {
+    return (Resolve-Winget)
 }
 
 function Invoke-WingetInstall($packageId) {
     # 尝试用 winget 安装，返回是否成功
-    if (-not (Test-Winget)) { return $false }
+    if (-not (Resolve-Winget)) { return $false }
     try {
-        winget install $packageId --source winget --accept-source-agreements --accept-package-agreements
+        & $script:WingetExe install $packageId --source winget --accept-source-agreements --accept-package-agreements
         return ($LASTEXITCODE -eq 0)
     } catch {
         Write-Warn "winget install failed: $_"
@@ -171,6 +204,8 @@ function Install-Winget {
             if ($env:Path -notlike "*$wingetDir*") {
                 $env:Path = "$wingetDir;$env:Path"
             }
+            # 缓存完整路径，后续调用直接用，绕开 Alias
+            $script:WingetExe = $wingetPath
             Write-OK "winget installed ($wingetPath)"
             return $true
         } else {
