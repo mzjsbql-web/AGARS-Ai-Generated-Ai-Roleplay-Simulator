@@ -707,6 +707,24 @@ if (Test-Command 'docker') {
     Write-Host "  docker run -d --name falkordb -p 6379:6379 falkordb/falkordb" -ForegroundColor Yellow
 }
 
+# --------------------------------------------------
+# Step 8: Ensure PowerShell execution policy allows scripts
+# --------------------------------------------------
+Write-Step "8" "Ensuring PowerShell execution policy..."
+
+$currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+if ($currentPolicy -eq 'Restricted' -or $currentPolicy -eq 'Undefined') {
+    try {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop
+        Write-OK "Execution policy set to RemoteSigned (CurrentUser scope)"
+    } catch {
+        Write-Warn "Could not set execution policy: $_"
+        Write-Host "  Run manually: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" -ForegroundColor Yellow
+    }
+} else {
+    Write-Skip "Execution policy already $currentPolicy (CurrentUser scope)"
+}
+
 # ============================================================
 # Done
 # ============================================================
