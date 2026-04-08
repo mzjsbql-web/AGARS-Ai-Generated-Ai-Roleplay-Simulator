@@ -477,21 +477,36 @@ if ($isServer) {
     Write-Host "  [INFO] Detected Windows Server" -ForegroundColor DarkGray
 }
 
-if (Test-Command 'docker') {
-    $dockerVer = (docker --version 2>$null)
-    Write-Skip "$dockerVer already installed"
-} elseif ($isServer) {
-    # Windows Server：安装 Docker Engine（原生容器支持，轻量无 GUI）
-    $installed = Install-DockerEngine
-    if (-not $installed) {
-        Write-Host "  Press Enter to continue, or Ctrl+C to exit."
-        Read-Host
+# Hypervisor Launch Type 检测（桌面版 Windows 始终执行，不管 Docker 是否已装）
+# 有些用户为了 VMware 性能执行过 bcdedit /set hypervisorlaunchtype off
+# 这会导致 Docker Desktop 报 "Virtualization support not detected"
+# 改为 auto 即可让 VMware 和 Docker 共存
+if (-not $isServer) {
+    try {
+        $bcdOutput = bcdedit /enum '{current}' 2>$null | Out-String
+        if ($bcdOutput -match 'hypervisorlaunchtype\s+Off') {
+            Write-Warn "Hypervisor launch type is OFF (Docker will not work)"
+            Write-Host "  Fixing: setting hypervisorlaunchtype to Auto..." -ForegroundColor Yellow
+            bcdedit /set hypervisorlaunchtype auto 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  [OK] Hypervisor launch type set to Auto" -ForegroundColor Green
+                Write-Host "  [INFO] VMware and Docker can now coexist" -ForegroundColor DarkGray
+                $script:NeedsReboot = $true
+            } else {
+                Write-Warn "Failed to set hypervisorlaunchtype (need admin privileges?)"
+                Write-Host "  Run manually as admin: bcdedit /set hypervisorlaunchtype auto" -ForegroundColor Yellow
+            }
+        } elseif ($bcdOutput -match 'hypervisorlaunchtype\s+Auto') {
+            Write-Host "  [SKIP] Hypervisor launch type already Auto" -ForegroundColor DarkGray
+        }
+    } catch {
+        # bcdedit 不可用（无管理员权限等），跳过
     }
-    Refresh-Path
-} else {
-    # 桌面版 Windows（Home/Pro/Edu/Ent）：确保 WSL2 依赖就绪，然后安装 Docker Desktop
+}
 
-    # 5a: 启用 Docker Desktop 所需的 Windows 功能（WSL2 后端）
+# WSL2 依赖检测（桌面版 Windows 始终执行，不管 Docker 是否已装）
+# Docker Desktop 依赖 WSL2，缺少这些功能会导致启动失败
+if (-not $isServer) {
     Write-Host "  Checking WSL2 prerequisites..." -ForegroundColor Gray
     $featuresEnabled = 0
 
@@ -525,31 +540,6 @@ if (Test-Command 'docker') {
         Write-Warn "Could not enable WSL: $_"
     }
 
-    # Hypervisor Launch Type 检测
-    # 有些用户为了 VMware 性能执行过 bcdedit /set hypervisorlaunchtype off
-    # 这会导致 Docker Desktop 报 "Virtualization support not detected"
-    # 改为 auto 即可让 VMware 和 Docker 共存
-    try {
-        $bcdOutput = bcdedit /enum '{current}' 2>$null | Out-String
-        if ($bcdOutput -match 'hypervisorlaunchtype\s+Off') {
-            Write-Warn "Hypervisor launch type is OFF (Docker will not work)"
-            Write-Host "  Fixing: setting hypervisorlaunchtype to Auto..." -ForegroundColor Yellow
-            bcdedit /set hypervisorlaunchtype auto 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  [OK] Hypervisor launch type set to Auto" -ForegroundColor Green
-                Write-Host "  [INFO] VMware and Docker can now coexist" -ForegroundColor DarkGray
-                $script:NeedsReboot = $true
-            } else {
-                Write-Warn "Failed to set hypervisorlaunchtype (need admin privileges?)"
-                Write-Host "  Run manually as admin: bcdedit /set hypervisorlaunchtype auto" -ForegroundColor Yellow
-            }
-        } elseif ($bcdOutput -match 'hypervisorlaunchtype\s+Auto') {
-            Write-Host "  [SKIP] Hypervisor launch type already Auto" -ForegroundColor DarkGray
-        }
-    } catch {
-        # bcdedit 不可用（无管理员权限等），跳过
-    }
-
     # 如果刚启用了功能，需要重启后才能用 WSL2 / Docker Desktop
     if ($featuresEnabled -gt 0) {
         $script:NeedsReboot = $true
@@ -562,8 +552,21 @@ if (Test-Command 'docker') {
             wsl --set-default-version 2 2>$null | Out-Null
         } catch { }
     }
+}
 
-    # 5b: 安装 Docker Desktop
+if (Test-Command 'docker') {
+    $dockerVer = (docker --version 2>$null)
+    Write-Skip "$dockerVer already installed"
+} elseif ($isServer) {
+    # Windows Server：安装 Docker Engine（原生容器支持，轻量无 GUI）
+    $installed = Install-DockerEngine
+    if (-not $installed) {
+        Write-Host "  Press Enter to continue, or Ctrl+C to exit."
+        Read-Host
+    }
+    Refresh-Path
+} else {
+    # 桌面版 Windows：安装 Docker Desktop
     Write-Host "  Installing Docker Desktop (may require admin privileges)..." -ForegroundColor Yellow
     $installed = Invoke-WingetInstall 'Docker.DockerDesktop'
     if ($installed) {
@@ -577,6 +580,38 @@ if (Test-Command 'docker') {
         Read-Host
     }
     Refresh-Path
+}
+
+# 尝试自动启动 Docker Desktop（桌面版 Windows）
+if (-not $isServer -and (Test-Command 'docker') -and -not $script:NeedsReboot) {
+    try {
+        $dockerInfo = docker info 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            # Docker 已安装但守护进程没运行，尝试启动 Docker Desktop
+            Write-Host "  Docker is not running, starting Docker Desktop..." -ForegroundColor Yellow
+            Start-Process "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe" -ErrorAction Stop
+            # 等待 Docker 就绪（最多等 60 秒）
+            $waited = 0
+            while ($waited -lt 60) {
+                Start-Sleep -Seconds 3
+                $waited += 3
+                $null = docker info 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-OK "Docker Desktop is running"
+                    break
+                }
+                Write-Host "  Waiting for Docker to start... ($waited s)" -ForegroundColor Gray
+            }
+            if ($waited -ge 60) {
+                Write-Warn "Docker Desktop is taking a while to start. It may still be loading in the background."
+            }
+        } else {
+            Write-Host "  [SKIP] Docker is already running" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warn "Could not auto-start Docker Desktop: $_"
+        Write-Host "  Please start Docker Desktop manually." -ForegroundColor Yellow
+    }
 }
 
 # --------------------------------------------------
