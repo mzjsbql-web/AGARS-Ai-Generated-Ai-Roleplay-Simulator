@@ -525,12 +525,37 @@ if (Test-Command 'docker') {
         Write-Warn "Could not enable WSL: $_"
     }
 
+    # Hypervisor Launch Type 检测
+    # 有些用户为了 VMware 性能执行过 bcdedit /set hypervisorlaunchtype off
+    # 这会导致 Docker Desktop 报 "Virtualization support not detected"
+    # 改为 auto 即可让 VMware 和 Docker 共存
+    try {
+        $bcdOutput = bcdedit /enum '{current}' 2>$null | Out-String
+        if ($bcdOutput -match 'hypervisorlaunchtype\s+Off') {
+            Write-Warn "Hypervisor launch type is OFF (Docker will not work)"
+            Write-Host "  Fixing: setting hypervisorlaunchtype to Auto..." -ForegroundColor Yellow
+            bcdedit /set hypervisorlaunchtype auto 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  [OK] Hypervisor launch type set to Auto" -ForegroundColor Green
+                Write-Host "  [INFO] VMware and Docker can now coexist" -ForegroundColor DarkGray
+                $script:NeedsReboot = $true
+            } else {
+                Write-Warn "Failed to set hypervisorlaunchtype (need admin privileges?)"
+                Write-Host "  Run manually as admin: bcdedit /set hypervisorlaunchtype auto" -ForegroundColor Yellow
+            }
+        } elseif ($bcdOutput -match 'hypervisorlaunchtype\s+Auto') {
+            Write-Host "  [SKIP] Hypervisor launch type already Auto" -ForegroundColor DarkGray
+        }
+    } catch {
+        # bcdedit 不可用（无管理员权限等），跳过
+    }
+
     # 如果刚启用了功能，需要重启后才能用 WSL2 / Docker Desktop
     if ($featuresEnabled -gt 0) {
         $script:NeedsReboot = $true
         Write-Warn "Windows features were enabled. A system reboot is required before Docker Desktop can work."
-    } else {
-        # 功能已就绪，尝试更新 WSL 内核
+    } elseif (-not $script:NeedsReboot) {
+        # 功能已就绪且不需要重启，尝试更新 WSL 内核
         try {
             Write-Host "  Updating WSL..." -ForegroundColor Gray
             wsl --update 2>$null | Out-Null
