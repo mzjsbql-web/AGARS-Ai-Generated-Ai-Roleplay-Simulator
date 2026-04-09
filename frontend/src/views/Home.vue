@@ -20,7 +20,7 @@
       <div class="hero-left">
         <div class="hero-meta-row">
           <span class="meta-tag">AI-GENERATED AI ROLEPLAY SIMULATOR</span>
-          <span class="meta-version">/ v0.1-preview</span>
+          <span class="meta-version">/ v0.2-preview</span>
         </div>
 
         <h1 class="hero-title">

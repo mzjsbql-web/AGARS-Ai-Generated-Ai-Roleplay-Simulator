@@ -501,8 +501,14 @@
                 v-model="playerSearchQuery"
                 type="text"
                 class="profile-search-input"
-                placeholder="搜索角色名、性格、背景..."
+                :placeholder="playerSearchNameOnly ? '搜索角色名...' : '搜索角色名、性格、背景...'"
               />
+              <button
+                class="search-mode-toggle"
+                :class="{ active: !playerSearchNameOnly }"
+                @click="playerSearchNameOnly = !playerSearchNameOnly"
+                :title="playerSearchNameOnly ? '当前：仅搜名称，点击切换全文' : '当前：全文搜索，点击切换仅名称'"
+              >{{ playerSearchNameOnly ? '名称' : '全文' }}</button>
               <span v-if="playerSearchQuery" class="profile-search-count">
                 {{ filteredPlayerProfiles.length }} / {{ profiles.length }}
               </span>
@@ -1060,6 +1066,7 @@ const selectedPlayerUuid = ref(null)
 const profileSearchQuery = ref('')
 const playerSearchQuery = ref('')
 const searchNameOnly = ref(true)  // true=仅名称, false=全文搜索
+const playerSearchNameOnly = ref(true)  // 选择列表：true=仅名称, false=全文搜索
 const initialSceneText = ref('')
 const openingMode = ref('ai')
 const openingDirectText = ref('')
@@ -1228,6 +1235,12 @@ const filteredProfiles = computed(() => {
 const filteredPlayerProfiles = computed(() => {
   const q = playerSearchQuery.value.trim().toLowerCase()
   if (!q) return profiles.value
+  if (playerSearchNameOnly.value) {
+    return profiles.value.filter(p =>
+      (p.name || '').toLowerCase().includes(q) ||
+      (p.username || '').toLowerCase().includes(q)
+    )
+  }
   return profiles.value.filter(p =>
     (p.name || '').toLowerCase().includes(q) ||
     (p.username || '').toLowerCase().includes(q) ||
