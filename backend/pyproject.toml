@@ -29,9 +29,15 @@ dependencies = [
     "charset-normalizer>=3.0.0",
     "chardet>=5.0.0",
     
+    # Graphiti + FalkorDB（本地图谱构建）
+    "graphiti-core[falkordb]>=0.28.0",
+    "falkordb>=1.0.0",
+
     # 工具库
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
+    "numpy>=1.24.0",
+    "json-repair>=0.30.0",
 ]
 
 [project.optional-dependencies]
