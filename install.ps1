@@ -211,9 +211,9 @@ function Install-PythonDirect {
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         $exePath = Join-Path $tmpDir 'python-installer.exe'
 
-        $pyUrl = 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe'
+        $pyUrl = 'https://www.python.org/ftp/python/3.11.11/python-3.11.11-amd64.exe'
 
-        Write-Host "  Downloading Python 3.12.8 ..." -ForegroundColor Gray
+        Write-Host "  Downloading Python 3.11.11 ..." -ForegroundColor Gray
         Invoke-WebRequest -Uri $pyUrl -OutFile $exePath -UseBasicParsing
 
         Write-Host "  Running installer (may prompt UAC)..." -ForegroundColor Gray
@@ -363,7 +363,7 @@ $script:NeedsReboot = $false  # Docker Engine on Server 可能需要系统重启
 # --------------------------------------------------
 # Step 1: PowerShell 执行策略
 # --------------------------------------------------
-Write-Step "1/7" "Checking PowerShell execution policy..."
+Write-Step "1/8" "Checking PowerShell execution policy..."
 
 $policy = Get-ExecutionPolicy
 if ($policy -eq 'Restricted') {
@@ -387,12 +387,39 @@ if (-not (Test-Winget)) {
 # --------------------------------------------------
 # Step 2: Node.js
 # --------------------------------------------------
-Write-Step "2/7" "Checking Node.js..."
+Write-Step "2/8" "Checking Node.js..."
 
+$nodeOK = $false
 if (Test-Command 'node') {
     $nodeVer = (node --version 2>$null)
-    Write-Skip "Node.js $nodeVer already installed"
-} else {
+    # 检查版本是否兼容（Vite 7 要求 ^20.19.0 || >=22.12.0）
+    $nodeVerMatch = [regex]::Match($nodeVer, '(\d+)\.(\d+)\.(\d+)')
+    if ($nodeVerMatch.Success) {
+        $nodeMajor = [int]$nodeVerMatch.Groups[1].Value
+        $nodeMinor = [int]$nodeVerMatch.Groups[2].Value
+        $nodePatch = [int]$nodeVerMatch.Groups[3].Value
+        $compatible = $false
+        # ^20.19.0: 20.19.0 ~ 20.x
+        if ($nodeMajor -eq 20 -and ($nodeMinor -gt 19 -or ($nodeMinor -eq 19 -and $nodePatch -ge 0))) {
+            $compatible = $true
+        }
+        # >=22.12.0
+        if ($nodeMajor -gt 22 -or ($nodeMajor -eq 22 -and ($nodeMinor -gt 12 -or ($nodeMinor -eq 12 -and $nodePatch -ge 0)))) {
+            $compatible = $true
+        }
+        if ($compatible) {
+            Write-Skip "Node.js $nodeVer already installed (compatible)"
+            $nodeOK = $true
+        } else {
+            Write-Warn "Node.js $nodeVer detected but NOT compatible (Vite 7 requires ^20.19.0 or >=22.12.0)"
+            Write-Host "  Will install Node.js LTS to upgrade..." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Skip "Node.js $nodeVer already installed"
+        $nodeOK = $true
+    }
+}
+if (-not $nodeOK) {
     Write-Host "  Installing Node.js LTS..." -ForegroundColor Yellow
     $installed = Invoke-WingetInstall 'OpenJS.NodeJS.LTS'
     if (-not $installed) {
@@ -416,14 +443,31 @@ if (Test-Command 'node') {
 # --------------------------------------------------
 # Step 3: Python
 # --------------------------------------------------
-Write-Step "3/7" "Checking Python..."
+Write-Step "3/8" "Checking Python..."
 
+$pyOK = $false
 if (Test-Command 'python') {
     $pyVer = (python --version 2>$null)
-    Write-Skip "$pyVer already installed"
-} else {
-    Write-Host "  Installing Python 3.12..." -ForegroundColor Yellow
-    $installed = Invoke-WingetInstall 'Python.Python.3.12'
+    # 检查版本是否兼容（需要 3.10 ~ 3.11，camel-oasis 要求 <3.12）
+    $pyVerMatch = [regex]::Match($pyVer, '(\d+)\.(\d+)')
+    if ($pyVerMatch.Success) {
+        $pyMajor = [int]$pyVerMatch.Groups[1].Value
+        $pyMinor = [int]$pyVerMatch.Groups[2].Value
+        if ($pyMajor -eq 3 -and $pyMinor -ge 10 -and $pyMinor -le 11) {
+            Write-Skip "$pyVer already installed (compatible)"
+            $pyOK = $true
+        } else {
+            Write-Warn "$pyVer detected but NOT compatible (need Python 3.10~3.11, camel-oasis requires <3.12)"
+            Write-Host "  Will install Python 3.11 alongside..." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Skip "$pyVer already installed"
+        $pyOK = $true
+    }
+}
+if (-not $pyOK) {
+    Write-Host "  Installing Python 3.11..." -ForegroundColor Yellow
+    $installed = Invoke-WingetInstall 'Python.Python.3.11'
     if (-not $installed) {
         # winget 失败（常见于 Windows Server），尝试直接下载安装
         $installed = Install-PythonDirect
@@ -445,7 +489,7 @@ if (Test-Command 'python') {
 # --------------------------------------------------
 # Step 4: uv (Python package manager)
 # --------------------------------------------------
-Write-Step "4/7" "Checking uv..."
+Write-Step "4/8" "Checking uv..."
 
 if (Test-Command 'uv') {
     $uvVer = (uv --version 2>$null)
@@ -470,7 +514,7 @@ if (Test-Command 'uv') {
 # --------------------------------------------------
 # Step 5: Docker（Server 装 Docker Engine，桌面版装 Docker Desktop）
 # --------------------------------------------------
-Write-Step "5/7" "Checking Docker..."
+Write-Step "5/8" "Checking Docker..."
 
 $isServer = Test-IsWindowsServer
 if ($isServer) {
@@ -650,7 +694,7 @@ if ($needsRestart) {
 # --------------------------------------------------
 # Step 6: Install project dependencies
 # --------------------------------------------------
-Write-Step "6/7" "Installing project dependencies (npm + uv)..."
+Write-Step "6/8" "Installing project dependencies (npm + uv)..."
 
 try {
     # Root + frontend npm install
@@ -667,7 +711,11 @@ try {
     Write-Host "  Running uv sync (backend)..." -ForegroundColor Gray
     Set-Location "$projectRoot\backend"
     uv sync
-    if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "uv sync failed, retrying with China mirror (mirrors.aliyun.com)..."
+        uv sync --index-url https://mirrors.aliyun.com/pypi/simple/
+        if ($LASTEXITCODE -ne 0) { throw "uv sync failed (both PyPI and China mirror)" }
+    }
     Set-Location $projectRoot
 
     Write-OK "All dependencies installed"
@@ -680,7 +728,7 @@ try {
 # --------------------------------------------------
 # Step 7: FalkorDB container
 # --------------------------------------------------
-Write-Step "7/7" "Setting up FalkorDB database..."
+Write-Step "7/8" "Setting up FalkorDB database..."
 
 if (Test-Command 'docker') {
     try {
@@ -710,7 +758,7 @@ if (Test-Command 'docker') {
 # --------------------------------------------------
 # Step 8: Ensure PowerShell execution policy allows scripts
 # --------------------------------------------------
-Write-Step "8" "Ensuring PowerShell execution policy..."
+Write-Step "8/8" "Ensuring PowerShell execution policy..."
 
 $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
 if ($currentPolicy -eq 'Restricted' -or $currentPolicy -eq 'Undefined') {
