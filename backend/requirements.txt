@@ -20,10 +20,9 @@ zep-cloud==3.13.0
 # 本地图谱构建（替代Zep Cloud图谱构建，避免边失效问题）
 graphiti-core[falkordb]>=0.28.0
 
-# ============= OASIS 社交媒体模拟 =============
-# OASIS 社交模拟框架
-camel-oasis==0.2.5
-camel-ai==0.2.78
+# ============= OASIS 社交媒体模拟（可选） =============
+# camel-oasis 锁死 neo4j==5.23.0，与 graphiti-core 的 neo4j>=5.26.0 冲突
+# 如需 OASIS 模拟功能，请单独安装：pip install camel-oasis==0.2.5 camel-ai==0.2.78
 
 # ============= 文件处理 =============
 PyMuPDF>=1.24.0

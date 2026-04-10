@@ -211,9 +211,9 @@ function Install-PythonDirect {
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         $exePath = Join-Path $tmpDir 'python-installer.exe'
 
-        $pyUrl = 'https://www.python.org/ftp/python/3.11.11/python-3.11.11-amd64.exe'
+        $pyUrl = 'https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe'
 
-        Write-Host "  Downloading Python 3.11.11 ..." -ForegroundColor Gray
+        Write-Host "  Downloading Python 3.12.8 ..." -ForegroundColor Gray
         Invoke-WebRequest -Uri $pyUrl -OutFile $exePath -UseBasicParsing
 
         Write-Host "  Running installer (may prompt UAC)..." -ForegroundColor Gray
@@ -448,17 +448,17 @@ Write-Step "3/8" "Checking Python..."
 $pyOK = $false
 if (Test-Command 'python') {
     $pyVer = (python --version 2>$null)
-    # 检查版本是否兼容（需要 3.10 ~ 3.11，camel-oasis 要求 <3.12）
+    # 检查版本是否兼容（需要 >=3.10）
     $pyVerMatch = [regex]::Match($pyVer, '(\d+)\.(\d+)')
     if ($pyVerMatch.Success) {
         $pyMajor = [int]$pyVerMatch.Groups[1].Value
         $pyMinor = [int]$pyVerMatch.Groups[2].Value
-        if ($pyMajor -eq 3 -and $pyMinor -ge 10 -and $pyMinor -le 11) {
+        if ($pyMajor -eq 3 -and $pyMinor -ge 10) {
             Write-Skip "$pyVer already installed (compatible)"
             $pyOK = $true
         } else {
-            Write-Warn "$pyVer detected but NOT compatible (need Python 3.10~3.11, camel-oasis requires <3.12)"
-            Write-Host "  Will install Python 3.11 alongside..." -ForegroundColor Yellow
+            Write-Warn "$pyVer detected but NOT compatible (need Python 3.10+)"
+            Write-Host "  Will install Python 3.12..." -ForegroundColor Yellow
         }
     } else {
         Write-Skip "$pyVer already installed"
@@ -466,8 +466,8 @@ if (Test-Command 'python') {
     }
 }
 if (-not $pyOK) {
-    Write-Host "  Installing Python 3.11..." -ForegroundColor Yellow
-    $installed = Invoke-WingetInstall 'Python.Python.3.11'
+    Write-Host "  Installing Python 3.12..." -ForegroundColor Yellow
+    $installed = Invoke-WingetInstall 'Python.Python.3.12'
     if (-not $installed) {
         # winget 失败（常见于 Windows Server），尝试直接下载安装
         $installed = Install-PythonDirect
