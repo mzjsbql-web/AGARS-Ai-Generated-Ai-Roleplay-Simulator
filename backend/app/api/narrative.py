@@ -139,27 +139,42 @@ def _run_prepare(session_id, graph_id, player_uuid, entity_types, parallel_count
         if entity_types:
             entity_types_list = [t.strip() for t in entity_types.split(',')]
         else:
-            # 未指定时，从项目本体中自动提取 is_agent=True 的类型
             entity_types_list = None
-            try:
-                from ..models.project import ProjectManager
-                project = ProjectManager.get_project(state.project_id)
-                if project and project.ontology:
-                    agent_types = [
-                        et["name"] for et in project.ontology.get("entity_types", [])
-                        if et.get("is_agent", True)
-                    ]
-                    if agent_types:
-                        entity_types_list = agent_types
-                        logger.info(f"从本体自动推导 agent 类型: {agent_types}")
-            except Exception as e:
-                logger.warning(f"推导 agent 类型失败，将使用全部实体: {e}")
 
+        # 从 ontology 获取 agent 类型列表（作为参考，非唯一判断依据）
+        ontology_agent_types = None
+        try:
+            from ..models.project import ProjectManager
+            project = ProjectManager.get_project(state.project_id)
+            if project and project.ontology:
+                ontology_agent_types = [
+                    et["name"] for et in project.ontology.get("entity_types", [])
+                    if et.get("is_agent")  # 不再默认 True，缺失 is_agent 的类型不纳入
+                ]
+                if not entity_types_list and ontology_agent_types:
+                    entity_types_list = ontology_agent_types
+                    logger.info(f"从本体自动推导 agent 类型: {ontology_agent_types}")
+        except Exception as e:
+            logger.warning(f"推导 agent 类型失败，将使用全部实体: {e}")
+
+        # 读取实体，同时让 reader 根据标签+summary 判断 is_agent
         entities = read_entities_from_falkordb(
             group_id=graph_id,
             entity_types=entity_types_list,
             required_uuids=[player_uuid] if player_uuid else None,
+            agent_types=ontology_agent_types,
         )
+
+        # 使用实体自身的 is_agent 字段过滤，仅保留 agent 实体（required_uuids 始终保留）
+        required_set = set([player_uuid] if player_uuid else [])
+        agent_entities = [
+            e for e in entities
+            if e.get("is_agent") or e["uuid"] in required_set
+        ]
+        non_agent_names = [e["name"] for e in entities if not e.get("is_agent") and e["uuid"] not in required_set]
+        if non_agent_names:
+            logger.info(f"过滤非 agent 实体: {non_agent_names}")
+        entities = agent_entities
 
         # 获取全部节点目录（含非 agent 类型），用于记忆系统 known_nodes 判断
         all_nodes_for_memory = read_all_nodes_directory(group_id=graph_id)

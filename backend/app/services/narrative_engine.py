@@ -539,6 +539,8 @@ class NarrativeEngine:
                     "turn_number": 0,
                     "timestamp": datetime.now().isoformat()
                 })
+                # 从开场文本提取初始世界时间（替代硬编码的 6:00）
+                cls._extract_initial_world_time(state, opening, llm)
                 cls._save_state(state)
 
             # 恢复时如果已在等待玩家，直接进入等待，不跳 turn
@@ -747,6 +749,35 @@ class NarrativeEngine:
         except Exception as e:
             logger.error(f"生成开场叙事失败: {e}")
             return f"你睁开眼睛，发现自己身处一个陌生的地方。{state.initial_scene or '周围的一切都还模糊不清。'}"
+
+    @classmethod
+    def _extract_initial_world_time(cls, state: NarrativeState, opening_text: str, llm: LLMClient):
+        """从开场叙事文本中提取初始世界时间，回写到 state.world_day / world_hour"""
+        if not opening_text or len(opening_text) < 20:
+            return
+        try:
+            prompt = safe_render(get_template('extract_initial_time'), {
+                'opening_text': opening_text[:1500],
+            })
+            _p = get_llm_params('extract_initial_time')
+            result = get_client_for_prompt('extract_initial_time').chat_json(
+                messages=[
+                    {"role": "system", "content": get_system('extract_initial_time')},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=_p['temperature'],
+                max_tokens=_p['max_tokens']
+            )
+            day = int(result.get("world_day", 1))
+            hour = float(result.get("world_hour", 6.0))
+            if day >= 1 and 0.0 <= hour < 24.0:
+                state.world_day = day
+                state.world_hour = hour
+                logger.info(f"从开场文本提取初始时间: 第{day}日 {hour:.1f}时 (原因: {result.get('reason', '')})")
+            else:
+                logger.warning(f"提取的时间值超出范围: day={day}, hour={hour}，保持默认")
+        except Exception as e:
+            logger.warning(f"开场时间提取失败，保持默认 (第1日 6:00): {e}")
 
     @classmethod
     def _build_opening_graph_context(
@@ -1367,6 +1398,106 @@ class NarrativeEngine:
         return "\n\n".join(memory_parts) if memory_parts else "（无额外记忆）"
 
     @classmethod
+    def _recall_plot_context(
+        cls,
+        state: NarrativeState,
+        player_action: str,
+        player_name: str,
+        player_location: str,
+        recent_events_text: str,
+    ) -> str:
+        """
+        剧情规划的两轮图谱记忆查询：
+        第一轮：LLM 从全局节点目录中选出与当前剧情最相关的节点（最多12个）
+        第二轮：查询这些节点的详细信息，格式化为文本
+        """
+        # 获取全局节点目录缓存
+        all_nodes_cache_key = f"_all_nodes_{state.graph_id}"
+        all_nodes_map = getattr(cls, all_nodes_cache_key, None)
+        if all_nodes_map is None:
+            try:
+                from .falkordb_entity_reader import read_all_nodes_directory
+                all_nodes_list = read_all_nodes_directory(group_id=state.graph_id)
+                all_nodes_map = {n["uuid"]: n for n in all_nodes_list}
+                setattr(cls, all_nodes_cache_key, all_nodes_map)
+            except Exception as e:
+                logger.warning(f"剧情规划记忆检索：获取节点目录失败: {e}")
+                return "（无图谱上下文）"
+
+        if not all_nodes_map:
+            return "（无图谱上下文）"
+
+        # 构建节点目录文本
+        dir_lines = []
+        for uuid, nd in all_nodes_map.items():
+            n_labels = [l for l in nd.get("labels", []) if l not in ("Entity", "Node")]
+            type_str = n_labels[0] if n_labels else "未分类"
+            summary_short = (nd.get("summary", "") or "")[:60]
+            dir_lines.append(f"- [{uuid}] {nd['name']}（{type_str}）：{summary_short}")
+        if not dir_lines:
+            return "（无图谱上下文）"
+
+        all_nodes_directory = "\n".join(dir_lines)
+
+        # 第一轮 LLM：选择相关节点
+        try:
+            recall_prompt = safe_render(get_template('plot_recall'), {
+                'player_action': player_action,
+                'player_name': player_name,
+                'player_location': player_location,
+                'recent_events_text': recent_events_text,
+                'all_nodes_directory': all_nodes_directory,
+            })
+            _p = get_llm_params('plot_recall')
+            recall_result = get_client_for_prompt('plot_recall').chat_json(
+                messages=[
+                    {"role": "system", "content": get_system('plot_recall')},
+                    {"role": "user", "content": recall_prompt}
+                ],
+                temperature=_p['temperature'],
+                max_tokens=_p['max_tokens']
+            )
+        except Exception as e:
+            logger.warning(f"剧情规划记忆检索LLM调用失败: {e}")
+            return "（无图谱上下文）"
+
+        recalled_uuids = recall_result.get("recalled_node_uuids", [])
+        if recall_result.get("recall_reason"):
+            logger.debug(f"剧情规划记忆检索: {recall_result['recall_reason']}")
+        if not recalled_uuids:
+            return "（无图谱上下文）"
+
+        # 验证并截断
+        valid_recalled = [u for u in recalled_uuids if u in all_nodes_map][:12]
+        if not valid_recalled:
+            return "（无图谱上下文）"
+
+        # 第二轮：查询节点详情
+        try:
+            recalled_nodes = read_nodes_by_uuids(
+                group_id=state.graph_id,
+                uuids=valid_recalled,
+            )
+        except Exception as e:
+            logger.warning(f"剧情规划记忆检索：查询节点详情失败: {e}")
+            return "（无图谱上下文）"
+
+        # 格式化
+        context_parts = []
+        for nd in recalled_nodes:
+            nd_name = nd.get("name", "")
+            nd_summary = nd.get("summary", "")
+            nd_facts = nd.get("related_facts", [])
+            part = f"【{nd_name}】{nd_summary}"
+            if nd_facts:
+                part += "\n" + "\n".join(f"  - {f}" for f in nd_facts[:4])
+            context_parts.append(part)
+
+        result_text = "\n\n".join(context_parts) if context_parts else "（无图谱上下文）"
+        logger.info(f"剧情规划图谱上下文: 召回 {len(valid_recalled)} 个节点")
+        return result_text
+
+    @classmethod
     def _process_npc_turn(
         cls,
         state: NarrativeState,
@@ -1901,8 +2032,19 @@ class NarrativeEngine:
         if not player_action:
             player_action = "观望等待"
 
-        # 行动前推进世界时间（与 NPC 行动等量）
-        current_world_time = _advance_world_time(state)
+        # 检测并应用玩家移动（在剧情规划之前，确保 plan 能看到正确的玩家位置）
+        cls._detect_player_movement(state, player_action)
+
+        # 先做剧情规划，再从 plan 中提取玩家行动的时间推进量
+        cls._plot_planning(state, player_action, player_profile, profiles, llm, zep_client)
+
+        # 从 plot_plan 的第一个 scheduled_turn 提取时间推进量
+        # 若无 plan 则回退到 10 分钟（而非固定30分钟）
+        player_time_minutes = 10
+        if state.plot_plan and state.plot_plan.get("scheduled_turns"):
+            first_turn = state.plot_plan["scheduled_turns"][0]
+            player_time_minutes = max(1, int(first_turn.get("time_minutes_since_last", 10)))
+        current_world_time = _advance_world_time(state, player_time_minutes / 60.0)
 
         # 玩家行动作为普通事件，与 NPC 事件无区别
         event = NarrativeEvent(
@@ -1924,12 +2066,6 @@ class NarrativeEngine:
         if zep_client:
             cls._write_event_to_graph(event, state.graph_id, zep_client)
 
-        # 检测并应用玩家移动（问题9：玩家位置之前从不更新）
-        cls._detect_player_movement(state, player_action)
-
-        # 剧情规划（指导后续 NPC 如何反应）
-        cls._plot_planning(state, player_action, player_profile, profiles, llm, zep_client)
-
         # 将玩家所选行动作为独立段落存入 narrative_segments，显示在正文流中
         state.narrative_segments.append({
             "text": player_action,
@@ -1939,7 +2075,7 @@ class NarrativeEngine:
             "timestamp": datetime.now().isoformat()
         })
 
-        logger.info(f"玩家行动已记录为事件: [{current_world_time}] {player_action[:60]}")
+        logger.info(f"玩家行动已记录为事件: [{current_world_time}] (+{player_time_minutes}min) {player_action[:60]}")
 
     @classmethod
     def _detect_player_movement(cls, state: NarrativeState, player_action: str):
@@ -2065,12 +2201,36 @@ class NarrativeEngine:
         recent_events_val = recent_events_text or '（无）'
         npc_list_val = npc_list_text or '（无NPC）'
 
+        # ---- 收集最近正文，让剧情规划了解当前叙事情境 ----
+        prev_count = get_setting('previous_narrative_count')
+        prev_max_chars = get_setting('previous_narrative_max_chars')
+        prev_segments = [s for s in state.narrative_segments
+                         if s.get("type") in ("player_scene", "opening")][-prev_count:]
+        previous_narrative = "\n\n---\n\n".join(
+            s["text"] for s in prev_segments if s.get("text")
+        )
+        if len(previous_narrative) > prev_max_chars:
+            previous_narrative = previous_narrative[-prev_max_chars:]
+
+        # 世界设定（initial_scene）
+        world_setting = state.initial_scene or ''
+        if state.prior_summary:
+            world_setting = state.prior_summary + ("\n" + world_setting if world_setting else "")
+        if len(world_setting) > 800:
+            world_setting = world_setting[:800]
+
+        # ---- 两轮图谱记忆查询：为剧情规划提供世界知识上下文 ----
+        graph_context = cls._recall_plot_context(state, player_action, player_name, player_location, recent_events_val)
+
         prompt = safe_render(get_template('plot_planning'), {
             "player_action": player_action,
             "player_name": player_name,
             "player_location": player_location,
             "recent_events_text": recent_events_val,
             "npc_list_text": npc_list_val,
+            "graph_context": graph_context,
+            "previous_narrative": previous_narrative or '（故事刚刚开始）',
+            "world_setting": world_setting or '（无世界设定）',
         })
 
         try:

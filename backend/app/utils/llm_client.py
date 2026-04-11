@@ -378,6 +378,13 @@ class LLMClient:
         """从 LLM 响应中提取 JSON，处理 CoT 推理文字、markdown 代码块（含截断情况）"""
         import re
         text = text.strip()
+        # 0. 检测并截断重复闭合括号的病态输出（如 "\n}\n}\n}\n}..."）
+        #    某些模型在 json_object 模式下 max_tokens 过大时会产生此问题
+        repeat_match = re.search(r'(\n\s*\}\s*){5,}', text)
+        if repeat_match:
+            # 保留到重复段起始位置 + 一个闭合括号
+            text = text[:repeat_match.start()] + '\n}'
+            logger.warning(f"检测到重复闭合括号病态输出，已截断至 {len(text)} 字符")
         # 1. 优先匹配完整的 ```json ... ``` 或 ``` ... ``` 代码块
         m = re.search(r'```(?:json)?\s*\n?(.*?)```', text, re.DOTALL)
         if m:

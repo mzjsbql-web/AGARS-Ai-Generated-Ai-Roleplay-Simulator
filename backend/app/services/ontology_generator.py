@@ -166,7 +166,11 @@ class OntologyGenerator:
             if "examples" not in entity:
                 entity["examples"] = []
             if "is_agent" not in entity:
-                entity["is_agent"] = True  # 旧数据兜底：默认可行动
+                # 旧数据兜底：根据 description/name 启发式判断，不再一律默认 True
+                desc = (entity.get("description", "") + " " + entity.get("name", "")).lower()
+                non_agent_hints = ['物品', '道具', '地点', '场所', '事件', '概念', '技能',
+                                   'item', 'location', 'place', 'event', 'concept']
+                entity["is_agent"] = not any(h in desc for h in non_agent_hints)
             # 确保description不超过100字符
             if len(entity.get("description", "")) > 100:
                 entity["description"] = entity["description"][:97] + "..."

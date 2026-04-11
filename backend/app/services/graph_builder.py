@@ -327,9 +327,104 @@ ADDITIONAL RULES FOR NARRATIVE TEXT (中文叙事文本补充规则):
                 return messages
             _extract_edges.versions['edge'] = _patched_edge
 
+            # ── 5. 边提取使用全批次节点池（修复设定集跨 chunk 实体关系丢失） ──
+            import graphiti_core.utils.bulk_utils as _bulk_utils
+            from graphiti_core.utils.maintenance.edge_operations import extract_edges as _orig_extract_edges
+            from graphiti_core.helpers import semaphore_gather as _semaphore_gather
+            from graphiti_core.nodes import EntityNode as _EntityNode
+
+            async def _patched_extract_nodes_and_edges_bulk(
+                clients, episode_tuples, edge_type_map,
+                entity_types=None, excluded_entity_types=None,
+                edge_types=None, custom_extraction_instructions=None,
+            ):
+                """
+                修改版：先提取所有 chunk 的节点，合并成全批次池（含图谱已有节点），
+                再提取边时把全池节点传入，解决 chunk 内未提取的实体导致边丢失的问题。
+                """
+                # Step 1: 提取所有 chunk 的节点（与原逻辑相同）
+                extracted_nodes_bulk = await _semaphore_gather(
+                    *[
+                        _bulk_utils.extract_nodes(
+                            clients, episode, previous_episodes,
+                            entity_types=entity_types,
+                            excluded_entity_types=excluded_entity_types,
+                            custom_extraction_instructions=custom_extraction_instructions,
+                        )
+                        for episode, previous_episodes in episode_tuples
+                    ]
+                )
+
+                # Step 2: 合并全批次节点池（按名称去重，保留首次出现的）
+                all_nodes_pool = []
+                seen_names = set()
+                for chunk_nodes in extracted_nodes_bulk:
+                    for node in chunk_nodes:
+                        if node.name not in seen_names:
+                            all_nodes_pool.append(node)
+                            seen_names.add(node.name)
+
+                # Step 2.5: 查询图谱中已有节点，把当前 chunk 文本里提到的加入池
+                # 解决跨批次实体引用（前批次已入图但当前批次未提取的实体）
+                try:
+                    group_id = episode_tuples[0][0].group_id if episode_tuples else None
+                    if group_id:
+                        existing_result = await clients.driver.execute_query(
+                            "MATCH (n:Entity) WHERE n.name IS NOT NULL AND n.name <> '' "
+                            "RETURN n.uuid AS uuid, n.name AS name, labels(n) AS labels LIMIT 500",
+                        )
+                        # 收集所有 chunk 文本，用于检查节点名是否出现
+                        all_text = " ".join(ep.content for ep, _ in episode_tuples)
+                        added_existing = 0
+                        for row in (existing_result or []):
+                            name = (row.get('name') or '').strip()
+                            if name and name not in seen_names and name in all_text:
+                                # 构建轻量 EntityNode 供边提取验证
+                                existing_node = _EntityNode(
+                                    uuid=row.get('uuid', ''),
+                                    name=name,
+                                    labels=row.get('labels') or [],
+                                    group_id=group_id,
+                                    summary='',
+                                )
+                                all_nodes_pool.append(existing_node)
+                                seen_names.add(name)
+                                added_existing += 1
+                        if added_existing:
+                            logger.info(
+                                f"[Graphiti patch] 从图谱补充 {added_existing} 个跨批次节点到节点池"
+                            )
+                except Exception as _e:
+                    logger.debug(f"[Graphiti patch] 跨批次节点查询失败（不影响流程）: {_e}")
+
+                logger.info(
+                    f"[Graphiti patch] 边提取节点池: "
+                    f"{len(all_nodes_pool)} 个唯一节点 "
+                    f"(来自 {len(extracted_nodes_bulk)} 个 chunk)"
+                )
+
+                # Step 3: 用全批次节点池提取每个 chunk 的边
+                extracted_edges_bulk = await _semaphore_gather(
+                    *[
+                        _orig_extract_edges(
+                            clients, episode, all_nodes_pool, previous_episodes,
+                            edge_type_map=edge_type_map,
+                            group_id=episode.group_id,
+                            edge_types=edge_types,
+                            custom_extraction_instructions=custom_extraction_instructions,
+                        )
+                        for episode, previous_episodes in episode_tuples
+                    ]
+                )
+
+                return extracted_nodes_bulk, extracted_edges_bulk
+
+            _bulk_utils.extract_nodes_and_edges_bulk = _patched_extract_nodes_and_edges_bulk
+
             logger.info(
                 "[Graphiti patch] Applied: MAX_SUMMARY_CHARS=800, "
-                "EPISODE_WINDOW_LEN=5, Chinese narrative prompts for summary/node/edge"
+                "EPISODE_WINDOW_LEN=5, Chinese narrative prompts for summary/node/edge, "
+                "full-batch node pool for edge extraction"
             )
         except Exception as e:
             logger.warning(f"[Graphiti patch] 部分覆盖失败（不影响构建）: {e}")

@@ -22,13 +22,17 @@ def safe_render(template: str, variables: Dict[str, Any]) -> str:
     """
     安全模板渲染：只替换 {word_chars} 形式的占位符，
     不会误伤 JSON 中的 {"key": ...} 结构。
+    同时处理 {{ → { 和 }} → } 的转义（与 Python str.format 行为一致）。
     """
     def _replacer(match):
         key = match.group(1)
         if key in variables:
             return str(variables[key])
         return match.group(0)  # 未匹配的占位符保持原样
-    return re.sub(r'\{(\w+)\}', _replacer, template)
+    result = re.sub(r'\{(\w+)\}', _replacer, template)
+    # 处理转义的双括号：{{ → { , }} → }
+    result = result.replace('{{', '{').replace('}}', '}')
+    return result
 
 
 # ============================================================
@@ -421,6 +425,36 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 }}"""
     },
 
+    "plot_recall": {
+        "category": "creative",
+        "label": "剧情规划记忆检索",
+        "description": "剧情规划前的全局记忆检索：从图谱中选出与当前剧情最相关的节点",
+        "system": "你是叙事世界的全局剧情分析器。根据当前剧情状况，从世界知识库中选出对规划下一步剧情最关键的信息节点。返回 JSON。",
+        "template": """你正在为叙事世界规划接下来的剧情走向。请从世界知识库中选出与当前局势最相关的节点。
+
+【玩家刚做出的行动】{player_action}
+【玩家角色】{player_name}（位于: {player_location}）
+
+【最近发生的事件】
+{recent_events_text}
+
+【世界知识库节点目录】
+{all_nodes_directory}
+
+请选出对规划剧情走向最有价值的节点（最多12个）。优先选择：
+1. 与玩家行动直接相关的角色、地点、物品
+2. 可能产生剧情联动的伏笔或悬念节点
+3. 与最近事件形成因果链的历史事件
+4. 当前活跃角色的重要背景信息
+5. 不要选择与当前剧情完全无关的节点
+
+返回 JSON：
+{{
+  "recalled_node_uuids": ["uuid1", "uuid2", "..."],
+  "recall_reason": "简述选择理由（1-2句话）"
+}}"""
+    },
+
     "event_importance": {
         "category": "creative",
         "label": "事件重要性评分",
@@ -547,6 +581,12 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "system": "你是叙事世界剧情规划师。你需要规划剧情节奏（多少回合、每回合多久）和具体行动安排。返回严格的 JSON。",
         "template": """你是叙事世界的剧情规划师。玩家刚做出了行动，请规划接下来的NPC反应、剧情节奏和走向。
 
+【世界设定】
+{world_setting}
+
+【当前叙事正文（最近的场景描写）】
+{previous_narrative}
+
 【玩家行动】{player_action}
 【玩家角色】{player_name}（位于: {player_location}）
 
@@ -555,6 +595,9 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 
 【所有NPC角色】
 {npc_list_text}
+
+【世界知识图谱上下文（与当前剧情相关的背景信息、人物关系、伏笔线索）】
+{graph_context}
 
 ═══ 你需要决定三件事 ═══
 
@@ -577,14 +620,14 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
   "scheduled_turns": [
     {{
       "turn_offset": 1,
-      "time_minutes_since_last": 5,
+      "time_minutes_since_last": 3,
       "agents": [
         {{"entity_uuid": "角色uuid", "directive": "该角色本回合应做什么（简短指导）"}}
       ]
     }},
     {{
       "turn_offset": 2,
-      "time_minutes_since_last": 30,
+      "time_minutes_since_last": 15,
       "agents": [
         {{"entity_uuid": "角色uuid", "directive": "..."}}
       ]
@@ -619,6 +662,31 @@ PROMPT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 - 玩家角色不要出现在 agents 中
 - 不是每次都需要新实体或退场，大多数回合 new_entities 为空数组
 - 时间节奏要合理：打斗中不会突然跳过一天，旅途中不需要每分钟都描述"""
+    },
+
+    "extract_initial_time": {
+        "category": "utility",
+        "label": "开场时间提取",
+        "description": "从开场叙事文本中提取故事初始时间（天数和小时）",
+        "system": "你是文本分析工具。从叙事文本中提取时间信息，返回 JSON。",
+        "template": """请从以下叙事文本中提取故事开始时的时间信息。
+
+【叙事文本】
+{opening_text}
+
+请判断文本中描述的时间，返回 JSON：
+{{
+  "world_day": 1,
+  "world_hour": 8.0,
+  "reason": "简短说明你的判断依据"
+}}
+
+字段说明：
+- world_day: 故事内第几天（通常为1，除非文本明确提到"第X天"或有多日跨度）
+- world_hour: 24小时制的小时数（0.0-23.99），例如：清晨=5.5, 上午=9.0, 正午=12.0, 下午=15.0, 傍晚=18.0, 入夜=20.0, 深夜=23.0, 凌晨=2.0
+- reason: 你从文本中找到了什么时间线索（如"夕阳西下"→傍晚≈18:00）
+
+如果文本中完全没有时间线索，请根据场景氛围合理推测。"""
     },
 
     "entity_generation": {

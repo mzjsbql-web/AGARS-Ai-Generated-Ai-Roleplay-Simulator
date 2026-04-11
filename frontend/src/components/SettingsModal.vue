@@ -89,6 +89,8 @@
                 <p class="prompt-desc">{{ prompt.description }}</p>
 
                 <div v-if="expandedKeys.has(prompt.key)" class="prompt-editor">
+                  <!-- 对 content_wrapper 类 prompt（只用 messages 数组），隐藏无用的 system/template -->
+                  <template v-if="editBuffer[prompt.key].messages === undefined">
                   <div class="editor-field">
                     <label>System Message</label>
                     <textarea
@@ -105,7 +107,8 @@
                       spellcheck="false"
                     ></textarea>
                   </div>
-                  <div class="llm-params-row">
+                  </template>
+                  <div v-if="editBuffer[prompt.key].messages === undefined" class="llm-params-row">
                     <div class="llm-param-field">
                       <label>Temperature</label>
                       <input
@@ -125,7 +128,7 @@
                       />
                     </div>
                   </div>
-                  <div class="api-config-row">
+                  <div v-if="editBuffer[prompt.key].messages === undefined" class="api-config-row">
                     <div class="api-config-field api-config-model">
                       <label>模型</label>
                       <div class="api-model-wrap">

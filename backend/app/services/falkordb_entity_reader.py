@@ -10,11 +10,77 @@ from ..utils.logger import get_logger
 
 logger = get_logger('agars.falkordb_reader')
 
+# 非 agent 关键词（出现在 labels 或 summary 中时倾向判为非 agent）
+_NON_AGENT_KEYWORDS = [
+    '物品', '道具', '武器', '装备', '药品', '食物', '工具', '材料', '宝物', '书籍', '文献', '信件',
+    '地点', '场所', '建筑', '城市', '村庄', '房间', '区域', '山', '河', '森林', '洞穴', '遗迹',
+    '事件', '战役', '灾难', '仪式', '节日', '历史',
+    '概念', '技能', '魔法', '法术', '阵法',
+    'item', 'weapon', 'location', 'place', 'event', 'concept', 'skill',
+]
+# agent 关键词（出现在 labels 或 summary 中时倾向判为 agent）
+_AGENT_KEYWORDS = [
+    '人物', '角色', '人', '族', '组织', '势力', '团体', '门派', '帮派', '家族', '王国', '帝国',
+    '军队', '商会', '教会', '公会',
+    'character', 'person', 'organization', 'faction', 'group',
+]
+
+
+def _classify_is_agent(
+    custom_labels: List[str],
+    summary: str,
+    agent_types: Optional[List[str]] = None,
+) -> bool:
+    """
+    判断实体是否为 agent（能自主行动的实体）。
+    优先级：
+    1. 如果实体标签命中 agent_types 列表（ontology 提供），直接判为 agent
+    2. 如果实体标签命中非 agent 关键词，判为非 agent
+    3. 如果实体标签命中 agent 关键词，判为 agent
+    4. 根据 summary 内容做启发式判断
+    5. 兜底：有标签但无法判断时 → False（保守策略）；无标签 → True（可能是未分类的重要角色）
+    """
+    labels_lower = [l.lower() for l in custom_labels]
+    labels_joined = " ".join(custom_labels).lower()
+
+    # 1. ontology 显式标记
+    if agent_types and custom_labels:
+        if any(l in agent_types for l in custom_labels):
+            return True
+        # 有标签但不在 agent_types 中，大概率不是 agent
+        # 但还需检查是否是 ontology 中遗漏 is_agent 的类型，继续往下判断
+
+    # 2. 标签关键词匹配
+    for kw in _NON_AGENT_KEYWORDS:
+        if kw in labels_joined:
+            return False
+    for kw in _AGENT_KEYWORDS:
+        if kw in labels_joined:
+            return True
+
+    # 3. summary 启发式判断
+    summary_lower = (summary or "").lower()[:200]
+    if summary_lower:
+        non_agent_hits = sum(1 for kw in _NON_AGENT_KEYWORDS if kw in summary_lower)
+        agent_hits = sum(1 for kw in _AGENT_KEYWORDS if kw in summary_lower)
+        if non_agent_hits > agent_hits:
+            return False
+        if agent_hits > non_agent_hits:
+            return True
+
+    # 4. 兜底
+    if custom_labels:
+        # 有标签但无法确定 → 保守判为非 agent
+        return False
+    # 无标签的实体可能是 Graphiti 未分配本体类型的重要角色
+    return True
+
 
 def read_entities_from_falkordb(
     group_id: str,
     entity_types: Optional[List[str]] = None,
     required_uuids: Optional[List[str]] = None,
+    agent_types: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     从 FalkorDB 读取实体及其关系信息
@@ -22,9 +88,12 @@ def read_entities_from_falkordb(
     Args:
         group_id: 图谱分区ID（即 project.graph_id）
         entity_types: 筛选的实体类型（可选）
+        agent_types: 被视为 agent 的实体类型名称列表（可选）。
+                     若提供，每个返回的实体会带 is_agent 字段；
+                     无标签实体根据 summary 启发式判断。
 
     Returns:
-        实体列表，每个实体包含 uuid, name, labels, summary, related_edges, related_nodes
+        实体列表，每个实体包含 uuid, name, labels, summary, related_edges, related_nodes, is_agent
     """
     from falkordb import FalkorDB
 
@@ -124,6 +193,9 @@ def read_entities_from_falkordb(
                     "summary": rn.get("summary", ""),
                 })
 
+        # 判断 is_agent：基于实体自身标签和 summary
+        is_agent = _classify_is_agent(custom_labels, node_data.get("summary", ""), agent_types)
+
         entities.append({
             "uuid": node_data["uuid"],
             "name": node_data.get("name", ""),
@@ -131,9 +203,11 @@ def read_entities_from_falkordb(
             "summary": node_data.get("summary", ""),
             "related_edges": related_edges,
             "related_nodes": related_nodes,
+            "is_agent": is_agent,
         })
 
-    logger.info(f"从 FalkorDB 读取实体: group_id={group_id}, 总节点={len(nodes)}, 筛选后={len(entities)}")
+    logger.info(f"从 FalkorDB 读取实体: group_id={group_id}, 总节点={len(nodes)}, 筛选后={len(entities)}, "
+                f"agents={sum(1 for e in entities if e.get('is_agent'))}")
     return entities
 
 
